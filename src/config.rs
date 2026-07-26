@@ -31,7 +31,38 @@ impl Config {
             "room owner key is empty"
         );
         anyhow::ensure!(!self.room.topic.trim().is_empty(), "room topic is empty");
-        anyhow::ensure!(!self.model.name.trim().is_empty(), "model name is empty");
+        anyhow::ensure!(
+            !self.model.classifier_name.trim().is_empty(),
+            "classifier model name is empty"
+        );
+        anyhow::ensure!(
+            !self.model.verifier_name.trim().is_empty(),
+            "verifier model name is empty"
+        );
+        match self.model.provider {
+            ModelProvider::Local => anyhow::ensure!(
+                self.model
+                    .unix_socket
+                    .as_ref()
+                    .is_some_and(|path| path.is_absolute()),
+                "local model unix_socket must be absolute"
+            ),
+            ModelProvider::OpenAi => anyhow::ensure!(
+                self.model
+                    .api_key_file
+                    .as_ref()
+                    .is_some_and(|path| path.is_absolute()),
+                "OpenAI api_key_file must be absolute"
+            ),
+        }
+        anyhow::ensure!(
+            self.model.request_timeout_seconds > 0,
+            "model request timeout must be positive"
+        );
+        anyhow::ensure!(
+            (1024..=1_048_576).contains(&self.model.max_response_bytes),
+            "model max_response_bytes is invalid"
+        );
         anyhow::ensure!(
             self.model.max_input_bytes > 0,
             "max_input_bytes must be positive"
@@ -80,6 +111,10 @@ impl Config {
         anyhow::ensure!(
             self.audit.max_message_bytes > 0,
             "audit message size must be positive"
+        );
+        anyhow::ensure!(
+            self.audit.path.is_absolute() && self.audit.decision_path.is_absolute(),
+            "audit paths must be absolute"
         );
         anyhow::ensure!(
             self.river.riverctl_path.is_absolute(),
@@ -153,6 +188,7 @@ pub struct ServiceConfig {
 #[serde(deny_unknown_fields)]
 pub struct AuditConfig {
     pub path: PathBuf,
+    pub decision_path: PathBuf,
     pub retention_days: u32,
     pub max_context_messages: usize,
     pub max_message_bytes: usize,
@@ -181,28 +217,72 @@ pub struct RoomConfig {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelConfig {
-    pub name: String,
+    pub provider: ModelProvider,
+    pub classifier_name: String,
+    pub verifier_name: String,
+    /// llama.cpp's Unix-domain socket. Used only by the local provider.
+    pub unix_socket: Option<PathBuf>,
+    /// A file containing only the API key. Used only by the OpenAI provider.
+    pub api_key_file: Option<PathBuf>,
+    pub request_timeout_seconds: u64,
+    pub max_response_bytes: usize,
     pub max_input_bytes: u64,
     pub max_output_tokens: u64,
-    /// Price in micro-USD per one million tokens. $0.05 is 50,000 micro-USD.
-    pub input_microusd_per_million_tokens: u64,
-    pub output_microusd_per_million_tokens: u64,
+    pub classifier_input_microusd_per_million_tokens: u64,
+    pub classifier_output_microusd_per_million_tokens: u64,
+    pub verifier_input_microusd_per_million_tokens: u64,
+    pub verifier_output_microusd_per_million_tokens: u64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelProvider {
+    Local,
+    OpenAi,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelRole {
+    Classifier,
+    Verifier,
 }
 
 impl ModelConfig {
     /// A UTF-8 byte cannot encode more than one token. Reserving one input token
     /// per request byte is deliberately conservative and independent of tokenizer drift.
-    pub fn maximum_request_cost_microusd(&self, request_bytes: u64) -> Result<u64> {
+    pub fn maximum_request_cost_microusd(
+        &self,
+        request_bytes: u64,
+        role: ModelRole,
+    ) -> Result<u64> {
         anyhow::ensure!(
             request_bytes <= self.max_input_bytes,
             "request exceeds max_input_bytes"
         );
-        let input = request_bytes
-            .checked_mul(self.input_microusd_per_million_tokens)
+        self.token_cost_microusd(request_bytes, self.max_output_tokens, role)
+    }
+
+    pub fn token_cost_microusd(
+        &self,
+        input_tokens: u64,
+        output_tokens: u64,
+        role: ModelRole,
+    ) -> Result<u64> {
+        let (input_price, output_price) = match role {
+            ModelRole::Classifier => (
+                self.classifier_input_microusd_per_million_tokens,
+                self.classifier_output_microusd_per_million_tokens,
+            ),
+            ModelRole::Verifier => (
+                self.verifier_input_microusd_per_million_tokens,
+                self.verifier_output_microusd_per_million_tokens,
+            ),
+        };
+        let input = input_tokens
+            .checked_mul(input_price)
             .context("input price overflow")?;
-        let output = self
-            .max_output_tokens
-            .checked_mul(self.output_microusd_per_million_tokens)
+        let output = output_tokens
+            .checked_mul(output_price)
             .context("output price overflow")?;
         input
             .checked_add(output)
@@ -250,25 +330,56 @@ mod tests {
     #[test]
     fn maximum_cost_is_conservative_and_bounded() {
         let model = ModelConfig {
-            name: "test".into(),
+            provider: ModelProvider::OpenAi,
+            classifier_name: "classifier".into(),
+            verifier_name: "verifier".into(),
+            unix_socket: None,
+            api_key_file: Some("/run/credentials/openai_api_key".into()),
+            request_timeout_seconds: 30,
+            max_response_bytes: 65_536,
             max_input_bytes: 4_000,
             max_output_tokens: 100,
-            input_microusd_per_million_tokens: 50_000,
-            output_microusd_per_million_tokens: 400_000,
+            classifier_input_microusd_per_million_tokens: 50_000,
+            classifier_output_microusd_per_million_tokens: 400_000,
+            verifier_input_microusd_per_million_tokens: 1_000_000,
+            verifier_output_microusd_per_million_tokens: 2_000_000,
         };
-        assert_eq!(model.maximum_request_cost_microusd(4_000).unwrap(), 240);
-        assert!(model.maximum_request_cost_microusd(4_001).is_err());
+        assert_eq!(
+            model
+                .maximum_request_cost_microusd(4_000, ModelRole::Classifier)
+                .unwrap(),
+            240
+        );
+        assert_eq!(
+            model
+                .maximum_request_cost_microusd(4_000, ModelRole::Verifier)
+                .unwrap(),
+            4_200
+        );
+        assert!(model
+            .maximum_request_cost_microusd(4_001, ModelRole::Classifier)
+            .is_err());
     }
 
     #[test]
     fn price_overflow_is_rejected() {
         let model = ModelConfig {
-            name: "test".into(),
+            provider: ModelProvider::OpenAi,
+            classifier_name: "classifier".into(),
+            verifier_name: "verifier".into(),
+            unix_socket: None,
+            api_key_file: Some("/run/credentials/openai_api_key".into()),
+            request_timeout_seconds: 30,
+            max_response_bytes: 65_536,
             max_input_bytes: u64::MAX,
             max_output_tokens: 1,
-            input_microusd_per_million_tokens: u64::MAX,
-            output_microusd_per_million_tokens: 1,
+            classifier_input_microusd_per_million_tokens: u64::MAX,
+            classifier_output_microusd_per_million_tokens: 1,
+            verifier_input_microusd_per_million_tokens: 1,
+            verifier_output_microusd_per_million_tokens: 1,
         };
-        assert!(model.maximum_request_cost_microusd(2).is_err());
+        assert!(model
+            .maximum_request_cost_microusd(2, ModelRole::Classifier)
+            .is_err());
     }
 }

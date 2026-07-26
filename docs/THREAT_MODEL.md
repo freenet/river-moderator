@@ -2,7 +2,12 @@
 
 ## Status
 
-This document is normative for the initial implementation. A release must not enable automatic enforcement until every release gate below is covered by a test or a documented operator procedure.
+This document is normative for the initial implementation. The production
+rollout begins in shadow mode: the daemon may read messages, call the configured
+model provider, and record projected decisions, but it has no River signing key
+or enforcement implementation. A release must not enable automatic enforcement
+until every release gate below is covered by a test or a documented operator
+procedure.
 
 The design assumes an attacker knows the complete source code, prompts, model names, thresholds, rate limits, service layout, and moderation policy. Confidential signing keys and provider credentials are the only secrets.
 
@@ -78,7 +83,12 @@ Deputy status is refreshed from authenticated room state and is not granted by t
 
 ## Enforcement architecture
 
-The internet-facing classifier holds no River signing key. It sends a closed internal action request to a local enforcer over a permission-restricted Unix socket.
+The shadow classifier holds no River signing key and cannot submit River writes.
+The separate enforcer described below is a required future enforcement boundary;
+it is not present in the shadow release.
+
+When enforcement is implemented, the classifier will send a closed internal
+action request to a local enforcer over a permission-restricted Unix socket.
 
 The enforcer:
 

@@ -1,0 +1,45 @@
+[Unit]
+Description=River room moderator (shadow mode)
+After=network-online.target freenet-gateway.service
+Wants=network-online.target freenet-gateway.service
+
+[Service]
+Type=simple
+User=river-moderator
+Group=river-moderator
+ExecStart=/usr/local/bin/river-moderator --config /etc/river-moderator/config.toml run
+LoadCredential=openai_api_key:/etc/river-moderator/credentials/openai_api_key
+StateDirectory=river-moderator
+RuntimeDirectory=river-moderator
+UMask=0077
+Environment=RUST_LOG=river_moderator=info
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=20s
+
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/river-moderator
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+MemoryMax=512M
+CPUQuota=100%
+Nice=10
+TasksMax=64
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

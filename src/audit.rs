@@ -13,12 +13,85 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    config::Mode,
     event::{TemporalSignals, VerifiedMessage},
-    membership::TrustTier,
+    membership::{MemberTenure, TrustTier},
+    policy::PolicyAction,
     verdict::{Category, Classification},
 };
 
 pub const AUDIT_SCHEMA_VERSION: u32 = 1;
+pub const DECISION_AUDIT_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionAuditRecord {
+    pub schema_version: u32,
+    pub decision_id: String,
+    pub recorded_at: DateTime<Utc>,
+    pub mode: Mode,
+    pub room_owner: String,
+    pub trigger: VerifiedMessage,
+    pub context: Vec<VerifiedMessage>,
+    pub temporal_signals: TemporalSignals,
+    pub tenure: MemberTenure,
+    pub trust_tier: TrustTier,
+    pub classifier_model: String,
+    pub verifier_model: Option<String>,
+    pub classifier: Classification,
+    pub verifier: Option<Classification>,
+    pub classifier_prompt_tokens: u64,
+    pub classifier_completion_tokens: u64,
+    #[serde(default)]
+    pub classifier_cost_microusd: u64,
+    pub verifier_prompt_tokens: Option<u64>,
+    pub verifier_completion_tokens: Option<u64>,
+    #[serde(default)]
+    pub verifier_cost_microusd: Option<u64>,
+    pub classifier_latency_ms: u64,
+    pub verifier_latency_ms: Option<u64>,
+    #[serde(default)]
+    pub day_cost_microusd: u64,
+    #[serde(default)]
+    pub month_cost_microusd: u64,
+    pub projected_action: PolicyAction,
+    pub classified_content_hash: String,
+}
+
+impl DecisionAuditRecord {
+    pub fn validate(&self, max_context_messages: usize, max_message_bytes: usize) -> Result<()> {
+        anyhow::ensure!(
+            self.schema_version == DECISION_AUDIT_SCHEMA_VERSION,
+            "unsupported decision audit schema"
+        );
+        anyhow::ensure!(!self.decision_id.is_empty(), "decision ID is empty");
+        anyhow::ensure!(
+            self.trigger.author_id == self.tenure.member_id,
+            "trigger author and tenure member differ"
+        );
+        anyhow::ensure!(
+            self.trigger.content_hash() == self.classified_content_hash,
+            "classified content hash does not match trigger"
+        );
+        anyhow::ensure!(
+            self.context.len() <= max_context_messages,
+            "decision audit context has too many messages"
+        );
+        anyhow::ensure!(
+            self.trigger.content.len() <= max_message_bytes
+                && self
+                    .context
+                    .iter()
+                    .all(|message| message.content.len() <= max_message_bytes),
+            "decision audit message exceeds size limit"
+        );
+        self.classifier.validate().map_err(anyhow::Error::msg)?;
+        if let Some(verifier) = &self.verifier {
+            verifier.validate().map_err(anyhow::Error::msg)?;
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -190,6 +263,50 @@ impl AuditLog {
             .lines()
             .map(|line| Ok(serde_json::from_str(&line?)?))
             .collect()
+    }
+}
+
+pub struct DecisionAuditLog {
+    file: Mutex<File>,
+}
+
+impl DecisionAuditLog {
+    pub fn open(path: &Path) -> Result<Self> {
+        let mut options = OpenOptions::new();
+        options.create(true).append(true).read(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let file = options
+            .open(path)
+            .with_context(|| format!("cannot open decision audit log {}", path.display()))?;
+        #[cfg(unix)]
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        Ok(Self {
+            file: Mutex::new(file),
+        })
+    }
+
+    pub fn append(
+        &self,
+        record: &DecisionAuditRecord,
+        max_context_messages: usize,
+        max_message_bytes: usize,
+    ) -> Result<()> {
+        record.validate(max_context_messages, max_message_bytes)?;
+        let mut encoded = serde_json::to_vec(record)?;
+        anyhow::ensure!(
+            encoded.len() <= 256 * 1024,
+            "encoded decision audit record exceeds hard limit"
+        );
+        encoded.push(b'\n');
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|_| anyhow::anyhow!("decision audit lock poisoned"))?;
+        file.write_all(&encoded)?;
+        file.flush()?;
+        file.sync_data()?;
+        Ok(())
     }
 }
 

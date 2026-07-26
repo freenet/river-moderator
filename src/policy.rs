@@ -95,7 +95,7 @@ fn decide_severe(input: &PolicyInput<'_>, policy: &PolicyConfig) -> PolicyAction
     };
     if verifier.validate().is_err()
         || verifier.verdict != Verdict::BanSevereHarm
-        || verifier.category != input.classification.category
+        || !severe_categories_compatible(verifier.category, input.classification.category)
     {
         return PolicyAction::HumanReview;
     }
@@ -125,6 +125,14 @@ fn decide_severe(input: &PolicyInput<'_>, policy: &PolicyConfig) -> PolicyAction
     }
 }
 
+/// Fraudulent wallet/credential lures are reasonably labelled either scam or
+/// phishing. Other severe categories must agree exactly.
+pub fn severe_categories_compatible(left: Category, right: Category) -> bool {
+    left == right
+        || (matches!(left, Category::Scam | Category::Phishing)
+            && matches!(right, Category::Scam | Category::Phishing))
+}
+
 fn deputy_emergency_category(category: Category) -> bool {
     matches!(
         category,
@@ -139,6 +147,7 @@ fn deputy_emergency_category(category: Category) -> bool {
             | Category::Hate
             | Category::Impersonation
             | Category::AccountCompromise
+            | Category::PromptInjection
             | Category::SexualExploitation
     )
 }
@@ -282,6 +291,18 @@ mod tests {
             descendant_count: 0,
         };
         assert_eq!(decide(&input, &policy()), PolicyAction::HumanReview);
+    }
+
+    #[test]
+    fn scam_and_phishing_verdicts_are_compatible_but_prompt_injection_is_not() {
+        assert!(severe_categories_compatible(
+            Category::Scam,
+            Category::Phishing
+        ));
+        assert!(!severe_categories_compatible(
+            Category::PromptInjection,
+            Category::Spam
+        ));
     }
 
     #[test]

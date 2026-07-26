@@ -1,7 +1,6 @@
 use crate::verdict::Category;
 
-pub const CONDUCT_NUDGE: &str =
-    "Criticism is welcome, but please keep it constructive and specific. What about the interface do you think should be improved?";
+pub const CONDUCT_NUDGE: &str = "Please keep criticism constructive and specific—describe what should improve without dismissive labels or personal remarks.";
 
 pub fn fixed_warning(category: Category) -> &'static str {
     match category {
@@ -35,6 +34,10 @@ mod tests {
         assert_eq!(
             fixed_warning(Category::PersonalAttack),
             "Moderation warning: Disagreement is welcome, but rudeness and personal attacks are not. Critique ideas, not people. Continued conduct will result in a ban."
+        );
+        assert_eq!(
+            CONDUCT_NUDGE,
+            "Please keep criticism constructive and specific—describe what should improve without dismissive labels or personal remarks."
         );
     }
 }

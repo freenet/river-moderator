@@ -1,11 +1,8 @@
 [service]
-# Enforcement is release-gated. Begin with shadow mode.
 mode = "shadow"
 state_database = "/var/lib/river-moderator/state.redb"
 
 [audit]
-# Contains bounded message text and is created mode 0600. Journald receives only
-# member IDs, hashes, categories, and outcomes.
 path = "/var/lib/river-moderator/ban-audit.jsonl"
 decision_path = "/var/lib/river-moderator/decision-audit.jsonl"
 retention_days = 30
@@ -13,7 +10,6 @@ max_context_messages = 20
 max_message_bytes = 4096
 
 [river]
-# Installed root-owned binary used by the localhost-only River reader.
 riverctl_path = "/usr/local/bin/riverctl"
 config_dir = "/var/lib/river-moderator/river"
 node_url = "ws://127.0.0.1:7509/v1/contract/command?encodingProtocol=native"
@@ -21,35 +17,37 @@ allow_remote_node = false
 max_event_bytes = 65536
 
 [room]
-owner_verifying_key = "REPLACE_WITH_ROOM_OWNER_VERIFYING_KEY"
+owner_verifying_key = "4uNUKFzZQCnzo4K2ecZ16cMsYEEfoaRS35z6exEsbvm4"
 topic = "Freenet, River, decentralized systems, and closely related project work"
-protected_member_ids = []
+protected_member_ids = [
+  "NRKA4WVX",
+  "7XSOGJTK",
+  "DLQVWAIV",
+  "NJFUM6VZ",
+  "FPVN6PUN",
+  "TKNQU26Z",
+]
 
 [model]
 provider = "open_ai"
 classifier_name = "gpt-5.6-luna"
 verifier_name = "gpt-5.6-sol"
-# Supplied by systemd LoadCredential; never store the key in this file.
 api_key_file = "/run/credentials/river-moderator.service/openai_api_key"
 request_timeout_seconds = 45
 max_response_bytes = 65536
-# Request serialization is bounded before the budget reservation.
 max_input_bytes = 12000
 max_output_tokens = 512
-# Explicit current prices in micro-USD per one million tokens. The service
-# reserves before the request and reconciles from provider-reported usage.
 classifier_input_microusd_per_million_tokens = 1000000
 classifier_output_microusd_per_million_tokens = 6000000
 verifier_input_microusd_per_million_tokens = 5000000
 verifier_output_microusd_per_million_tokens = 30000000
 
 [limits]
-# One USD is 1,000,000 micro-USD. These local caps are checked before network I/O.
-daily_budget_microusd = 1000000
-monthly_budget_microusd = 15000000
+daily_budget_microusd = 5000000
+monthly_budget_microusd = 50000000
 requests_per_minute = 120
-requests_per_hour = 500
-requests_per_day = 5000
+requests_per_hour = 1000
+requests_per_day = 10000
 requests_per_author_hour = 120
 queue_depth = 200
 concurrency = 4

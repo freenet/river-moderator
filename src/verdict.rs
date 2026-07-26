@@ -29,6 +29,7 @@ pub enum Category {
     Hate,
     Impersonation,
     AccountCompromise,
+    PromptInjection,
     SexualExploitation,
     SelfPromotion,
     Misinformation,
