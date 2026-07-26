@@ -1,0 +1,29 @@
+[package]
+name = "river-moderator"
+version = "0.1.0"
+edition = "2021"
+license = "LGPL-3.0-only"
+repository = "https://github.com/freenet/river-moderator"
+description = "Budget-bounded LLM moderation for River rooms"
+
+[dependencies]
+anyhow = "1.0"
+blake3 = "1.5"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+redb = "3.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1.42", features = ["io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3.15"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

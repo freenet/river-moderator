@@ -1,0 +1,5 @@
+/target/
+*.redb
+*.redb.*
+.env
+credentials/

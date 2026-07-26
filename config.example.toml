@@ -1,0 +1,57 @@
+[service]
+# Enforcement is release-gated. Begin with shadow mode.
+mode = "shadow"
+state_database = "/var/lib/river-moderator/state.redb"
+
+[audit]
+# Contains bounded message text and is created mode 0600. Journald receives only
+# member IDs, hashes, categories, and outcomes.
+path = "/var/lib/river-moderator/ban-audit.jsonl"
+retention_days = 30
+max_context_messages = 20
+max_message_bytes = 4096
+
+[river]
+# Installed root-owned binary used only by the localhost-only reader/enforcer.
+riverctl_path = "/usr/local/bin/riverctl"
+config_dir = "/var/lib/river-moderator/river"
+node_url = "ws://127.0.0.1:7509/v1/contract/command?encodingProtocol=native"
+max_event_bytes = 65536
+
+[room]
+owner_verifying_key = "REPLACE_WITH_ROOM_OWNER_VERIFYING_KEY"
+topic = "Freenet, River, decentralized systems, and closely related project work"
+protected_member_ids = []
+
+[model]
+name = "REPLACE_WITH_PINNED_CLASSIFIER_MODEL"
+# Request serialization is bounded before the budget reservation.
+max_input_bytes = 12000
+max_output_tokens = 100
+# Explicit operator-controlled price assumptions. These values are examples,
+# not a promise of current provider pricing.
+input_microusd_per_million_tokens = 50000
+output_microusd_per_million_tokens = 400000
+
+[limits]
+# One USD is 1,000,000 micro-USD. These local caps are checked before network I/O.
+daily_budget_microusd = 1000000
+monthly_budget_microusd = 15000000
+requests_per_minute = 120
+requests_per_hour = 500
+requests_per_day = 5000
+requests_per_author_hour = 120
+queue_depth = 200
+concurrency = 4
+
+[policy]
+warning_window_hours = 24
+max_ban_descendants = 0
+ban_confidence_millionths = 980000
+deputy_ban_confidence_millionths = 995000
+warning_confidence_millionths = 900000
+regular_after_days = 7
+regular_after_messages = 10
+established_after_days = 30
+established_after_active_days = 10
+established_after_messages = 50
