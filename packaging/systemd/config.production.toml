@@ -30,6 +30,7 @@ protected_member_ids = [
   "TKNQU26Z",
   "4CLPTJPM",
 ]
+protected_nicknames = ["Room Owner", "Invite Bot", "River Marshal", "Moderator", "Ian Clarke"]
 service_member_ids = ["4CLPTJPM", "NRKA4WVX"]
 
 [model]

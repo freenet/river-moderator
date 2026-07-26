@@ -6,6 +6,7 @@ pub mod event;
 pub mod local_model;
 pub mod membership;
 pub mod model;
+pub mod name_guard;
 pub mod openai_model;
 pub mod policy;
 pub mod river_action;

@@ -16,6 +16,7 @@ use crate::{
     event::{temporal_signals, VerifiedMessage},
     membership::MemberRegistry,
     model::{ModelPass, ModelResult},
+    name_guard::{self, NameGuardAction},
     openai_model::OpenAiModelClient,
     policy::{decide, PolicyInput},
     river_action::{ban_member_safely, send_fixed_reply},
@@ -203,29 +204,59 @@ async fn process_message(
         &message.author_id,
         message.first_observed_at,
     )?;
-    if is_routine_join_notice(&message) {
-        tracing::info!(
-            member_id = %message.author_id,
-            content_hash = %short_hash(&message.content_hash()),
-            "routine join notice recorded without model call"
-        );
-        return Ok(());
-    }
-    if config
-        .room
-        .service_member_ids
-        .iter()
-        .any(|member| member == &message.author_id)
-    {
-        tracing::info!(member_id = %message.author_id, "service-authored message ignored");
-        return Ok(());
-    }
+
     let is_protected = config
         .room
         .protected_member_ids
         .iter()
         .any(|member| member == &message.author_id);
+    let is_service = config
+        .room
+        .service_member_ids
+        .iter()
+        .any(|member| member == &message.author_id);
     let trust_tier = tenure.trust_tier(message.first_observed_at, is_protected, &config.policy);
+
+    if is_service {
+        tracing::info!(member_id = %message.author_id, "service-authored message ignored");
+        return Ok(());
+    }
+    let join_name_candidate = if is_routine_join_notice(&message) {
+        match name_guard::inspect(&message.nickname, &config.room.protected_nicknames) {
+            NameGuardAction::Observe => {
+                tracing::info!(
+                    member_id = %message.author_id,
+                    nickname = %message.nickname,
+                    content_hash = %short_hash(&message.content_hash()),
+                    "routine join notice recorded; nickname guard allowed"
+                );
+                false
+            }
+            NameGuardAction::Ban { reason } if is_protected => {
+                tracing::warn!(
+                    member_id = %message.author_id,
+                    nickname = %message.nickname,
+                    reason = %reason,
+                    "nickname guard refused protected identity target"
+                );
+                false
+            }
+            NameGuardAction::Ban { reason } => {
+                tracing::warn!(
+                    member_id = %message.author_id,
+                    nickname = %message.nickname,
+                    reason = %reason,
+                    "nickname guard triggered model verification before any action"
+                );
+                true
+            }
+        }
+    } else {
+        false
+    };
+    if is_routine_join_notice(&message) && !join_name_candidate {
+        return Ok(());
+    }
     let payload_limit = config
         .model
         .max_input_bytes
@@ -241,6 +272,7 @@ async fn process_message(
             trust_tier,
             active_warning: None,
             moderator_member_ids: &config.room.protected_member_ids,
+            join_name_candidate,
         },
         payload_limit as usize,
     )?;

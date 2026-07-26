@@ -29,6 +29,7 @@ max_event_bytes = 65536
 owner_verifying_key = "REPLACE_WITH_ROOM_OWNER_VERIFYING_KEY"
 topic = "Freenet, River, decentralized systems, and closely related project work"
 protected_member_ids = []
+protected_nicknames = ["Room Owner", "Invite Bot", "River Marshal", "Moderator"]
 service_member_ids = []
 
 [model]

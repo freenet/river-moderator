@@ -35,6 +35,9 @@ Return only the configured closed JSON schema. The reason is a concise factual a
 #[serde(deny_unknown_fields)]
 pub struct ClassifierPayload {
     pub policy_version: String,
+    /// Trusted routing metadata; the nickname and all message strings remain
+    /// untrusted data. This tells the provider that no first message exists.
+    pub join_name_candidate: bool,
     pub room_topic: String,
     pub policy_summary: PolicySummary,
     pub target_tenure: TenureSummary,
@@ -103,6 +106,7 @@ pub struct PayloadInput<'a> {
     pub trust_tier: TrustTier,
     pub active_warning: Option<&'a WarningRecord>,
     pub moderator_member_ids: &'a [String],
+    pub join_name_candidate: bool,
 }
 
 /// Construct a bounded request. Oldest context is removed until the serialized
@@ -152,6 +156,7 @@ pub fn build_payload(input: PayloadInput<'_>, max_bytes: usize) -> Result<Vec<u8
 
     let mut payload = ClassifierPayload {
         policy_version: POLICY_VERSION.into(),
+        join_name_candidate: input.join_name_candidate,
         room_topic: input.room_topic.into(),
         policy_summary: PolicySummary {
             be_civil: true,
@@ -285,6 +290,7 @@ mod tests {
                 trust_tier: TrustTier::Probationary,
                 active_warning: None,
                 moderator_member_ids: &["attacker-full-id".into()],
+                join_name_candidate: false,
             },
             16_384,
         )
@@ -317,6 +323,7 @@ mod tests {
                 trust_tier: TrustTier::Regular,
                 active_warning: None,
                 moderator_member_ids: &[],
+                join_name_candidate: false,
             },
             2_000,
         )

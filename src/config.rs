@@ -255,6 +255,9 @@ pub struct RoomConfig {
     pub protected_member_ids: Vec<String>,
     #[serde(default)]
     pub service_member_ids: Vec<String>,
+    /// Exact normalized names whose use impersonates a protected identity.
+    #[serde(default)]
+    pub protected_nicknames: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -73,3 +73,9 @@ and members with descendants, protects configured service/operator IDs, and
 applies persistent per-minute, hourly, and daily ban caps. Ban operations are
 fixed CLI calls signed by the configured room-owner credential; untrusted model
 text is never interpreted as a command or command argument.
+
+Join notices receive a separate high-confidence nickname prefilter before the
+member's first message. It normalizes Unicode, strips zero-width characters,
+checks severe-name and protected-identity patterns, and sends only candidates
+to the classifier and independent verifier. The pattern match never bans by
+itself; ambiguous names remain log-only.
