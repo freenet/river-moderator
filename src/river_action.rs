@@ -201,8 +201,12 @@ fn validate_secret_file(path: &std::path::Path) -> Result<()> {
     let metadata = std::fs::metadata(path).context("cannot stat ban signing credential")?;
     anyhow::ensure!(metadata.is_file(), "ban signing credential is not a file");
     anyhow::ensure!(
-        metadata.permissions().mode() & 0o077 == 0,
-        "ban signing credential permissions are not private"
+        metadata.uid() == 0,
+        "ban signing credential must be owned by root"
+    );
+    anyhow::ensure!(
+        metadata.permissions().mode() & 0o007 == 0 && metadata.permissions().mode() & 0o022 == 0,
+        "ban signing credential must not be world-readable or writable"
     );
     Ok(())
 }
