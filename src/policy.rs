@@ -11,8 +11,8 @@ use crate::{
 pub enum PolicyAction {
     None,
     RecordDisruption,
-    NudgeAsOwner,
-    WarnAsOwner,
+    NudgeAsModerator,
+    WarnAsModerator,
     BanAsModerator,
     BanAsOwnerPolicyEscalation,
     BanAsOwnerEmergency,
@@ -49,14 +49,22 @@ fn decide_nudge(input: &PolicyInput<'_>, policy: &PolicyConfig) -> PolicyAction 
     }
     if !matches!(
         input.classification.category,
-        Category::Conduct | Category::Incivility | Category::PersonalAttack
+        Category::OffTopic | Category::Conduct | Category::Incivility | Category::PersonalAttack
     ) {
         return PolicyAction::HumanReview;
     }
+    if input.classification.category == Category::OffTopic {
+        if input.trust_tier == TrustTier::Deputy {
+            return PolicyAction::RecordDisruption;
+        }
+        if input.trust_tier == TrustTier::Established && input.prior_category_observations < 2 {
+            return PolicyAction::RecordDisruption;
+        }
+    }
     if input.prior_category_observations > 0 {
-        PolicyAction::WarnAsOwner
+        PolicyAction::WarnAsModerator
     } else {
-        PolicyAction::NudgeAsOwner
+        PolicyAction::NudgeAsModerator
     }
 }
 
@@ -80,12 +88,12 @@ fn decide_disruption(input: &PolicyInput<'_>, policy: &PolicyConfig) -> PolicyAc
         };
     }
     match input.trust_tier {
-        TrustTier::Probationary | TrustTier::Regular => PolicyAction::WarnAsOwner,
+        TrustTier::Probationary | TrustTier::Regular => PolicyAction::WarnAsModerator,
         TrustTier::Established if !is_off_topic || input.prior_category_observations >= 2 => {
-            PolicyAction::WarnAsOwner
+            PolicyAction::WarnAsModerator
         }
         TrustTier::Established => PolicyAction::RecordDisruption,
-        TrustTier::Deputy => PolicyAction::WarnAsOwner,
+        TrustTier::Deputy => PolicyAction::WarnAsModerator,
     }
 }
 
@@ -160,6 +168,9 @@ mod tests {
         PolicyConfig {
             warning_window_hours: 24,
             low_severity_grace_seconds: 60,
+            global_action_interval_seconds: 300,
+            member_action_cooldown_hours: 24,
+            max_pending_action_age_seconds: 300,
             max_ban_descendants: 0,
             ban_confidence_millionths: 980_000,
             deputy_ban_confidence_millionths: 995_000,
@@ -193,6 +204,26 @@ mod tests {
             has_active_warning: true,
             descendant_count: 0,
         };
+        assert_eq!(decide(&input, &policy()), PolicyAction::RecordDisruption);
+    }
+
+    #[test]
+    fn first_polarizing_tangent_is_a_redirect_not_a_formal_warning() {
+        let c = classification(Verdict::NudgeConduct, Category::OffTopic, 999_000);
+        let mut input = PolicyInput {
+            classification: &c,
+            verifier: None,
+            trust_tier: TrustTier::Probationary,
+            prior_category_observations: 0,
+            has_active_warning: false,
+            descendant_count: 0,
+        };
+        assert_eq!(decide(&input, &policy()), PolicyAction::NudgeAsModerator);
+        input.prior_category_observations = 1;
+        assert_eq!(decide(&input, &policy()), PolicyAction::WarnAsModerator);
+        input.trust_tier = TrustTier::Established;
+        assert_eq!(decide(&input, &policy()), PolicyAction::RecordDisruption);
+        input.trust_tier = TrustTier::Deputy;
         assert_eq!(decide(&input, &policy()), PolicyAction::RecordDisruption);
     }
 
@@ -243,7 +274,7 @@ mod tests {
         };
         assert_eq!(decide(&input, &policy()), PolicyAction::RecordDisruption);
         input.prior_category_observations = 2;
-        assert_eq!(decide(&input, &policy()), PolicyAction::WarnAsOwner);
+        assert_eq!(decide(&input, &policy()), PolicyAction::WarnAsModerator);
     }
 
     #[test]
@@ -258,7 +289,7 @@ mod tests {
                 has_active_warning: false,
                 descendant_count: 0,
             };
-            assert_eq!(decide(&input, &policy()), PolicyAction::WarnAsOwner);
+            assert_eq!(decide(&input, &policy()), PolicyAction::WarnAsModerator);
         }
     }
 
@@ -316,8 +347,8 @@ mod tests {
             has_active_warning: false,
             descendant_count: 0,
         };
-        assert_eq!(decide(&input, &policy()), PolicyAction::NudgeAsOwner);
+        assert_eq!(decide(&input, &policy()), PolicyAction::NudgeAsModerator);
         input.prior_category_observations = 1;
-        assert_eq!(decide(&input, &policy()), PolicyAction::WarnAsOwner);
+        assert_eq!(decide(&input, &policy()), PolicyAction::WarnAsModerator);
     }
 }

@@ -27,6 +27,7 @@ protected_member_ids = [
   "FPVN6PUN",
   "TKNQU26Z",
 ]
+service_member_ids = ["4CLPTJPM"]
 
 [model]
 provider = "open_ai"
@@ -55,6 +56,9 @@ concurrency = 4
 [policy]
 warning_window_hours = 24
 low_severity_grace_seconds = 60
+global_action_interval_seconds = 300
+member_action_cooldown_hours = 24
+max_pending_action_age_seconds = 300
 max_ban_descendants = 0
 ban_confidence_millionths = 980000
 deputy_ban_confidence_millionths = 995000

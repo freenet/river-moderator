@@ -2,6 +2,9 @@
 # Enforcement is release-gated. Begin with shadow mode.
 mode = "shadow"
 state_database = "/var/lib/river-moderator/state.redb"
+# Required in warn mode. Only messages first observed at or after this cutoff
+# may produce a public action; shadow history is never replayed.
+# activation_at = "2026-01-01T00:00:00Z"
 
 [audit]
 # Contains bounded message text and is created mode 0600. Journald receives only
@@ -24,6 +27,7 @@ max_event_bytes = 65536
 owner_verifying_key = "REPLACE_WITH_ROOM_OWNER_VERIFYING_KEY"
 topic = "Freenet, River, decentralized systems, and closely related project work"
 protected_member_ids = []
+service_member_ids = []
 
 [model]
 provider = "open_ai"
@@ -57,6 +61,9 @@ concurrency = 4
 [policy]
 warning_window_hours = 24
 low_severity_grace_seconds = 60
+global_action_interval_seconds = 300
+member_action_cooldown_hours = 24
+max_pending_action_age_seconds = 300
 max_ban_descendants = 0
 ban_confidence_millionths = 980000
 deputy_ban_confidence_millionths = 995000

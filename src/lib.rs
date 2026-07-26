@@ -8,6 +8,7 @@ pub mod membership;
 pub mod model;
 pub mod openai_model;
 pub mod policy;
+pub mod river_action;
 pub mod river_stream;
 pub mod runtime;
 pub mod state;

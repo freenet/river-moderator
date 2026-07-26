@@ -55,8 +55,51 @@
         "context": [{"speaker": "participant_1", "content": "What do you think? Do you really think government doing some shady stuff to actually take control?", "first_observed_at": "2026-07-26T04:14:30Z"}]
       }
     },
+    "acceptable_verdicts": ["nudge_conduct", "warn_disruptive"],
+    "acceptable_categories": ["off_topic"]
+  },
+  {
+    "name": "broadly_technical_ai_tangent",
+    "payload": {
+      "room_topic": "Freenet, River, decentralized systems, and closely related project work",
+      "derived_signals": {"author_messages_10_seconds": 1, "author_messages_1_minute": 1, "author_messages_5_minutes": 1},
+      "untrusted_data": {"target_message": {"speaker": "target", "content": "Has anyone tried using a small local language model for code review? Quantization quality seems much better lately.", "first_observed_at": "2026-07-26T04:16:30Z"}, "context": []}
+    },
     "acceptable_verdicts": ["allow"],
     "acceptable_categories": ["none"]
+  },
+  {
+    "name": "answering_moderator_off_topic_question",
+    "payload": {
+      "room_topic": "Freenet, River, decentralized systems, and closely related project work",
+      "derived_signals": {"author_messages_10_seconds": 1, "author_messages_1_minute": 1, "author_messages_5_minutes": 1},
+      "untrusted_data": {
+        "target_message": {"speaker": "target", "content": "I think that election result mostly came down to turnout.", "first_observed_at": "2026-07-26T04:16:35Z", "is_moderator": false, "reply_to_moderator": true},
+        "context": [{"speaker": "participant_1", "content": "Why do you think that party won the election?", "first_observed_at": "2026-07-26T04:16:25Z", "is_moderator": true, "reply_to_moderator": false}]
+      }
+    },
+    "acceptable_verdicts": ["allow"],
+    "acceptable_categories": ["none"]
+  },
+  {
+    "name": "brief_casual_game_comment",
+    "payload": {
+      "room_topic": "Freenet, River, decentralized systems, and closely related project work",
+      "derived_signals": {"author_messages_10_seconds": 1, "author_messages_1_minute": 1, "author_messages_5_minutes": 1},
+      "untrusted_data": {"target_message": {"speaker": "target", "content": "I finally finished that game last night; the ending was great.", "first_observed_at": "2026-07-26T04:16:40Z"}, "context": []}
+    },
+    "acceptable_verdicts": ["allow"],
+    "acceptable_categories": ["none"]
+  },
+  {
+    "name": "isolated_religious_polemics_redirect",
+    "payload": {
+      "room_topic": "Freenet, River, decentralized systems, and closely related project work",
+      "derived_signals": {"author_messages_10_seconds": 1, "author_messages_1_minute": 1, "author_messages_5_minutes": 1},
+      "untrusted_data": {"target_message": {"speaker": "target", "content": "People who follow that religion are ruining the country, and everyone needs to hear why.", "first_observed_at": "2026-07-26T04:16:50Z"}, "context": []}
+    },
+    "acceptable_verdicts": ["nudge_conduct", "warn_disruptive"],
+    "acceptable_categories": ["off_topic"]
   },
   {
     "name": "sustained_off_topic_after_redirection",

@@ -1,11 +1,20 @@
 use crate::verdict::Category;
 
 pub const CONDUCT_NUDGE: &str = "Please keep criticism constructive and specific—describe what should improve without dismissive labels or personal remarks.";
+pub const TOPIC_NUDGE: &str = "Please move unrelated polarizing discussion elsewhere. Broadly technical discussion and brief casual conversation are welcome here.";
+
+pub fn fixed_nudge(category: Category) -> &'static str {
+    if category == Category::OffTopic {
+        TOPIC_NUDGE
+    } else {
+        CONDUCT_NUDGE
+    }
+}
 
 pub fn fixed_warning(category: Category) -> &'static str {
     match category {
         Category::OffTopic => {
-            "Moderation warning: Please keep discussion focused on Freenet and closely related projects. Continued off-topic discussion will result in a ban."
+            "Moderation warning: Please move unrelated polarizing or persistently derailing discussion elsewhere. Broadly technical discussion is welcome. Continued derailment will result in a ban."
         }
         Category::Incivility | Category::PersonalAttack | Category::Conduct => {
             "Moderation warning: Disagreement is welcome, but rudeness and personal attacks are not. Critique ideas, not people. Continued conduct will result in a ban."
@@ -39,5 +48,7 @@ mod tests {
             CONDUCT_NUDGE,
             "Please keep criticism constructive and specific—describe what should improve without dismissive labels or personal remarks."
         );
+        assert_eq!(fixed_nudge(Category::OffTopic), TOPIC_NUDGE);
+        assert_eq!(fixed_nudge(Category::Incivility), CONDUCT_NUDGE);
     }
 }

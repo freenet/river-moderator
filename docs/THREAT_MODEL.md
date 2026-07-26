@@ -44,7 +44,7 @@ It also selects a closed category, confidence, and a short audit reason. Intent 
 
 Low-severity nudges and warnings have a configurable grace period (60 seconds by default). If the Room Owner or a current deputy sends an authenticated reply to the exact target message during that period, trusted code cancels the automated action and records `handled_by_moderator`. Nicknames and reply preview text are not sufficient; cancellation requires River's verified reply target message ID and responder member ID. Severe-harm actions do not wait for this grace period.
 
-`warn_disruptive` covers sustained off-topic discussion, rudeness, incivility, ad hominem or other personal attacks below the severe-harm threshold, repetitive promotion, monopolizing the room, inflammatory derailment, excessive posting, and persistently harmful misinformation. Members may disagree strongly and criticize ideas, code, projects, and decisions, but must do so politely. Repetition after a category-specific warning may be escalated to a ban.
+`warn_disruptive` covers persistent or inflammatory derailment, rudeness, incivility, ad hominem or other personal attacks below the severe-harm threshold, repetitive promotion, monopolizing the room, excessive posting, and persistently harmful misinformation. Topic is interpreted broadly: technical and technically adjacent discussion is allowed, as are brief social tangents. Off-topic intervention focuses on unrelated polarizing subjects or discussion that continues after redirection. Members may disagree strongly and criticize ideas, code, projects, and decisions, but must do so politely. Repetition after a category-specific warning may be escalated to a ban.
 
 `ban_severe_harm` covers spam, scams, phishing, malware, doxxing, credible threats, targeted harassment or hate, impersonation, sexual exploitation, and extreme flooding. A severe outcome does not require proof of malicious intent.
 
@@ -179,7 +179,9 @@ Hard spending limits convert an unbounded financial attack into a bounded modera
 
 ## Release gates
 
-Automatic warnings or bans remain disabled until all of the following pass:
+Automatic warnings require gates 1–5 and 7–10 below. Automatic bans additionally
+require gate 6 and a separately isolated enforcer; bans remain disabled in the
+current implementation.
 
 1. Persistent budget tests cover process restart, concurrent reservation, day/month boundaries, missing usage, provider timeout without retry, price overflow, and state corruption.
 2. Deduplication tests cover reconnects, edits, duplicate content, and pending-ban suppression.

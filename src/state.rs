@@ -14,6 +14,7 @@ const OBSERVATIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("policy_
 const PENDING_BANS: TableDefinition<&str, &[u8]> = TableDefinition::new("pending_bans_v1");
 const PENDING_LOW_SEVERITY: TableDefinition<&str, &[u8]> =
     TableDefinition::new("pending_low_severity_v1");
+const ACTION_LIMITS: TableDefinition<&str, &[u8]> = TableDefinition::new("action_limits_v1");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EventDisposition {
@@ -60,6 +61,16 @@ pub enum LowSeverityAction {
     FormalWarning,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LowSeverityOutcome {
+    Claimed,
+    Sent,
+    Failed,
+    SuppressedStale,
+    SuppressedChangedOrDeleted,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct PendingLowSeverity {
     pub decision_id: String,
@@ -68,8 +79,17 @@ pub struct PendingLowSeverity {
     pub target_member_id: String,
     pub classified_content_hash: String,
     pub action: LowSeverityAction,
+    pub category: Category,
+    pub created_at: DateTime<Utc>,
     pub execute_after: DateTime<Utc>,
     pub cancelled_by_member_id: Option<String>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub outcome: Option<LowSeverityOutcome>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct ActionLimitRecord {
+    last_action_at: DateTime<Utc>,
 }
 
 pub struct ModerationState {
@@ -89,6 +109,7 @@ impl ModerationState {
         write.open_table(OBSERVATIONS)?;
         write.open_table(PENDING_BANS)?;
         write.open_table(PENDING_LOW_SEVERITY)?;
+        write.open_table(ACTION_LIMITS)?;
         write.commit()?;
         Ok(Self { database })
     }
@@ -194,6 +215,27 @@ impl ModerationState {
         Ok(true)
     }
 
+    /// Confirm that the authenticated message still has exactly the content
+    /// that was classified and has not since been deleted.
+    pub fn message_is_current(
+        &self,
+        room_owner: &str,
+        message_id: &str,
+        member_id: &str,
+        classified_content_hash: &str,
+    ) -> Result<bool> {
+        let key = event_key(room_owner, message_id);
+        let read = self.database.begin_read()?;
+        let table = read.open_table(EVENTS)?;
+        let Some(value) = table.get(key.as_str())? else {
+            return Ok(false);
+        };
+        let stored: StoredEvent = serde_json::from_slice(value.value())?;
+        Ok(stored.message.author_id == member_id
+            && stored.content_hash == classified_content_hash
+            && stored.deleted_at.is_none())
+    }
+
     pub fn context(
         &self,
         room_owner: &str,
@@ -239,13 +281,14 @@ impl ModerationState {
 
     pub fn record_policy_observation(
         &self,
+        policy_version: &str,
         room_owner: &str,
         member_id: &str,
         category: Category,
         now: DateTime<Utc>,
         window: Duration,
     ) -> Result<u32> {
-        let key = observation_key(room_owner, member_id, category);
+        let key = observation_key(policy_version, room_owner, member_id, category);
         let write = self.database.begin_write()?;
         let mut table = write.open_table(OBSERVATIONS)?;
         let existing = table.get(key.as_str())?;
@@ -325,19 +368,30 @@ impl ModerationState {
             .transpose()
     }
 
-    pub fn schedule_low_severity(&self, pending: &PendingLowSeverity) -> Result<()> {
+    pub fn schedule_low_severity(&self, pending: &PendingLowSeverity) -> Result<bool> {
         let key = event_key(&pending.room_owner, &pending.target_message_id);
         let encoded = serde_json::to_vec(pending)?;
         let write = self.database.begin_write()?;
         let mut table = write.open_table(PENDING_LOW_SEVERITY)?;
-        anyhow::ensure!(
-            table.get(key.as_str())?.is_none(),
-            "message already has a pending low-severity action"
-        );
+        if table.get(key.as_str())?.is_some() {
+            return Ok(false);
+        }
+        for entry in table.iter()? {
+            let (_, value) = entry?;
+            let existing: PendingLowSeverity = serde_json::from_slice(value.value())?;
+            if existing.room_owner == pending.room_owner
+                && existing.target_member_id == pending.target_member_id
+                && warning_group(existing.category) == warning_group(pending.category)
+                && existing.cancelled_by_member_id.is_none()
+                && existing.completed_at.is_none()
+            {
+                return Ok(false);
+            }
+        }
         table.insert(key.as_str(), encoded.as_slice())?;
         drop(table);
         write.commit()?;
-        Ok(())
+        Ok(true)
     }
 
     /// Cancel only when a locally configured moderator authored an authenticated
@@ -379,12 +433,130 @@ impl ModerationState {
         for entry in table.iter()? {
             let (_, value) = entry?;
             let pending: PendingLowSeverity = serde_json::from_slice(value.value())?;
-            if pending.cancelled_by_member_id.is_none() && pending.execute_after <= now {
+            if pending.cancelled_by_member_id.is_none()
+                && pending.completed_at.is_none()
+                && pending.execute_after <= now
+            {
                 due.push(pending);
             }
         }
         Ok(due)
     }
+
+    /// Claim at most one due action transactionally. The claim consumes global
+    /// and per-member cooldowns before external I/O, so a crash cannot produce a
+    /// duplicate warning after restart. Stale queued actions are suppressed.
+    pub fn claim_due_low_severity(
+        &self,
+        now: DateTime<Utc>,
+        global_interval: Duration,
+        member_interval: Duration,
+        max_age: Duration,
+    ) -> Result<Option<PendingLowSeverity>> {
+        let write = self.database.begin_write()?;
+        let mut pending_table = write.open_table(PENDING_LOW_SEVERITY)?;
+        let mut due = Vec::new();
+        for entry in pending_table.iter()? {
+            let (key, value) = entry?;
+            let pending: PendingLowSeverity = serde_json::from_slice(value.value())?;
+            if pending.cancelled_by_member_id.is_none()
+                && pending.completed_at.is_none()
+                && pending.execute_after <= now
+            {
+                due.push((key.value().to_owned(), pending));
+            }
+        }
+        due.sort_by_key(|(_, pending)| pending.execute_after);
+
+        for (key, mut pending) in due {
+            if pending.created_at < now - max_age {
+                pending.completed_at = Some(now);
+                pending.outcome = Some(LowSeverityOutcome::SuppressedStale);
+                let encoded = serde_json::to_vec(&pending)?;
+                pending_table.insert(key.as_str(), encoded.as_slice())?;
+                continue;
+            }
+
+            let mut limits = write.open_table(ACTION_LIMITS)?;
+            let global_key = format!("{}:global", pending.room_owner);
+            let member_key = format!("{}:member:{}", pending.room_owner, pending.target_member_id);
+            let global_last = read_action_limit(&limits, &global_key)?;
+            let member_last = read_action_limit(&limits, &member_key)?;
+            if global_last.is_some_and(|last| last > now - global_interval)
+                || member_last.is_some_and(|last| last > now - member_interval)
+            {
+                drop(limits);
+                continue;
+            }
+            let limit = serde_json::to_vec(&ActionLimitRecord {
+                last_action_at: now,
+            })?;
+            limits.insert(global_key.as_str(), limit.as_slice())?;
+            limits.insert(member_key.as_str(), limit.as_slice())?;
+            drop(limits);
+
+            pending.completed_at = Some(now);
+            pending.outcome = Some(LowSeverityOutcome::Claimed);
+            let encoded = serde_json::to_vec(&pending)?;
+            pending_table.insert(key.as_str(), encoded.as_slice())?;
+            drop(pending_table);
+            write.commit()?;
+            return Ok(Some(pending));
+        }
+        drop(pending_table);
+        write.commit()?;
+        Ok(None)
+    }
+
+    pub fn complete_low_severity(
+        &self,
+        pending: &PendingLowSeverity,
+        outcome: LowSeverityOutcome,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            matches!(
+                outcome,
+                LowSeverityOutcome::Sent
+                    | LowSeverityOutcome::Failed
+                    | LowSeverityOutcome::SuppressedChangedOrDeleted
+            ),
+            "invalid terminal low-severity outcome"
+        );
+        let key = event_key(&pending.room_owner, &pending.target_message_id);
+        let write = self.database.begin_write()?;
+        let mut table = write.open_table(PENDING_LOW_SEVERITY)?;
+        let existing = table
+            .get(key.as_str())?
+            .context("pending action disappeared")?;
+        let mut stored: PendingLowSeverity = serde_json::from_slice(existing.value())?;
+        drop(existing);
+        anyhow::ensure!(
+            stored.outcome == Some(LowSeverityOutcome::Claimed),
+            "action was not claimed"
+        );
+        stored.outcome = Some(outcome);
+        stored.completed_at = Some(now);
+        let encoded = serde_json::to_vec(&stored)?;
+        table.insert(key.as_str(), encoded.as_slice())?;
+        drop(table);
+        write.commit()?;
+        Ok(())
+    }
+}
+
+fn read_action_limit(
+    table: &impl ReadableTable<&'static str, &'static [u8]>,
+    key: &str,
+) -> Result<Option<DateTime<Utc>>> {
+    table
+        .get(key)?
+        .map(|entry| {
+            serde_json::from_slice::<ActionLimitRecord>(entry.value())
+                .map(|record| record.last_action_at)
+                .context("invalid action limit record")
+        })
+        .transpose()
 }
 
 fn event_key(room: &str, message: &str) -> String {
@@ -395,8 +567,14 @@ fn member_key(room: &str, member: &str) -> String {
     format!("{room}:{member}")
 }
 
-fn observation_key(room: &str, member: &str, category: Category) -> String {
-    format!("{}:{}:{}", room, member, warning_group(category))
+fn observation_key(policy_version: &str, room: &str, member: &str, category: Category) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        policy_version,
+        room,
+        member,
+        warning_group(category)
+    )
 }
 
 fn warning_key(room: &str, member: &str, category: Category) -> String {
@@ -489,6 +667,37 @@ mod tests {
     }
 
     #[test]
+    fn warning_preflight_refuses_edited_deleted_or_wrong_author_messages() {
+        let dir = tempdir().unwrap();
+        let state = ModerationState::open(&dir.path().join("state.redb")).unwrap();
+        let original = message("m", "original", at(1));
+        let original_hash = original.content_hash();
+        state.record_message(original, 100, 4096).unwrap();
+        assert!(state
+            .message_is_current("room", "m", "member", &original_hash)
+            .unwrap());
+        assert!(!state
+            .message_is_current("room", "m", "wrong-member", &original_hash)
+            .unwrap());
+
+        state
+            .record_message(message("m", "edited", at(2)), 100, 4096)
+            .unwrap();
+        assert!(!state
+            .message_is_current("room", "m", "member", &original_hash)
+            .unwrap());
+        let edited_hash = message("m", "edited", at(2)).content_hash();
+        assert!(state
+            .message_is_current("room", "m", "member", &edited_hash)
+            .unwrap());
+
+        state.record_deletion("room", "m", at(3)).unwrap();
+        assert!(!state
+            .message_is_current("room", "m", "member", &edited_hash)
+            .unwrap());
+    }
+
+    #[test]
     fn warning_groups_prevent_category_label_evasion() {
         let dir = tempdir().unwrap();
         let state = ModerationState::open(&dir.path().join("state.redb")).unwrap();
@@ -538,7 +747,7 @@ mod tests {
     fn authenticated_moderator_reply_cancels_delayed_nudge() {
         let dir = tempdir().unwrap();
         let state = ModerationState::open(&dir.path().join("state.redb")).unwrap();
-        state
+        assert!(state
             .schedule_low_severity(&PendingLowSeverity {
                 decision_id: "d".into(),
                 room_owner: "room".into(),
@@ -546,10 +755,14 @@ mod tests {
                 target_member_id: "new-member".into(),
                 classified_content_hash: "hash".into(),
                 action: LowSeverityAction::Nudge,
+                category: Category::Incivility,
+                created_at: at(1),
                 execute_after: at(1) + Duration::seconds(60),
                 cancelled_by_member_id: None,
+                completed_at: None,
+                outcome: None,
             })
-            .unwrap();
+            .unwrap());
         assert!(!state
             .cancel_if_handled_by_moderator(
                 "room",
@@ -570,5 +783,63 @@ mod tests {
             .due_low_severity(at(1) + Duration::seconds(120))
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn claims_only_one_action_per_global_interval_and_never_replays_claim() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.redb");
+        let state = ModerationState::open(&path).unwrap();
+        for (id, member) in [("one", "member-a"), ("two", "member-b")] {
+            assert!(state
+                .schedule_low_severity(&PendingLowSeverity {
+                    decision_id: id.into(),
+                    room_owner: "room".into(),
+                    target_message_id: id.into(),
+                    target_member_id: member.into(),
+                    classified_content_hash: "hash".into(),
+                    action: LowSeverityAction::FormalWarning,
+                    category: Category::OffTopic,
+                    created_at: at(1),
+                    execute_after: at(2),
+                    cancelled_by_member_id: None,
+                    completed_at: None,
+                    outcome: None,
+                })
+                .unwrap());
+        }
+        let first = state
+            .claim_due_low_severity(
+                at(3),
+                Duration::seconds(300),
+                Duration::hours(24),
+                Duration::seconds(600),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.outcome, Some(LowSeverityOutcome::Claimed));
+        drop(state);
+        let state = ModerationState::open(&path).unwrap();
+        assert!(state
+            .claim_due_low_severity(
+                at(4),
+                Duration::seconds(300),
+                Duration::hours(24),
+                Duration::seconds(600),
+            )
+            .unwrap()
+            .is_none());
+        state
+            .complete_low_severity(&first, LowSeverityOutcome::Sent, at(4))
+            .unwrap();
+        assert!(state
+            .claim_due_low_severity(
+                at(4),
+                Duration::seconds(300),
+                Duration::hours(24),
+                Duration::seconds(600),
+            )
+            .unwrap()
+            .is_none());
     }
 }

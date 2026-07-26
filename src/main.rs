@@ -10,7 +10,7 @@ use river_moderator::{
     model::{ModelPass, ModelResult},
     openai_model::OpenAiModelClient,
     policy::severe_categories_compatible,
-    runtime::run_shadow,
+    runtime::run_moderator,
     verdict::{Category, Verdict},
 };
 use serde::Deserialize;
@@ -31,7 +31,7 @@ enum Command {
     CheckConfig,
     /// Print current persistent budget counters.
     BudgetStatus,
-    /// Run the classifier. Only shadow mode is implemented in this pre-release.
+    /// Run the classifier and, in warn mode, fixed rate-limited public replies.
     Run,
     /// Explicitly mark a newline-delimited current roster as pre-existing.
     BootstrapMembers { member_ids_file: PathBuf },
@@ -68,10 +68,10 @@ async fn main() -> anyhow::Result<()> {
         Command::Run => {
             config.validate()?;
             anyhow::ensure!(
-                config.service.mode.is_shadow(),
-                "enforcement is release-gated; only shadow mode is currently accepted"
+                !config.service.mode.is_enforce(),
+                "automatic bans remain release-gated"
             );
-            run_shadow(config).await?;
+            run_moderator(config).await?;
         }
         Command::BootstrapMembers { member_ids_file } => {
             config.validate()?;

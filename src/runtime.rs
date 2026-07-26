@@ -8,23 +8,31 @@ use tokio::sync::{mpsc, Semaphore};
 use crate::{
     audit::{DecisionAuditLog, DecisionAuditRecord, DECISION_AUDIT_SCHEMA_VERSION},
     budget::BudgetLedger,
-    classifier::{build_payload, PayloadInput},
-    config::{Config, ModelProvider, ModelRole},
+    classifier::{build_payload, PayloadInput, POLICY_VERSION},
+    config::{Config, Mode, ModelProvider, ModelRole},
     event::{temporal_signals, VerifiedMessage},
     membership::MemberRegistry,
     model::{ModelPass, ModelResult},
     openai_model::OpenAiModelClient,
     policy::{decide, PolicyInput},
+    river_action::send_fixed_reply,
     river_stream::{spawn_reader, RoomEvent},
-    state::{EventDisposition, ModerationState},
+    state::{
+        EventDisposition, LowSeverityAction, LowSeverityOutcome, ModerationState,
+        PendingLowSeverity, WarningRecord,
+    },
     verdict::{Category, Verdict},
+    warnings::{fixed_nudge, fixed_warning},
 };
 
 const MODEL_REQUEST_OVERHEAD_BYTES: u64 = 6_000;
 const HISTORY_MESSAGES: usize = 200;
 
-pub async fn run_shadow(config: Config) -> Result<()> {
-    anyhow::ensure!(config.service.mode.is_shadow(), "runtime is shadow-only");
+pub async fn run_moderator(config: Config) -> Result<()> {
+    anyhow::ensure!(
+        config.service.mode != Mode::Enforce,
+        "automatic bans are not implemented"
+    );
     anyhow::ensure!(
         config.model.provider == ModelProvider::OpenAi,
         "live runtime currently requires the OpenAI provider"
@@ -40,13 +48,18 @@ pub async fn run_shadow(config: Config) -> Result<()> {
     let audit = Arc::new(DecisionAuditLog::open(&config.audit.decision_path)?);
     let model = Arc::new(OpenAiModelClient::new(&config.model)?);
     let config = Arc::new(config);
+    if config.service.mode == Mode::Warn {
+        let action_config = config.clone();
+        let action_state = state.clone();
+        tokio::spawn(async move { warning_loop(action_config, action_state).await });
+    }
     let (sender, mut receiver) = mpsc::channel(config.limits.queue_depth);
     let reader_config = config.clone();
     tokio::spawn(async move { reader_loop(reader_config, sender).await });
     let concurrency = Arc::new(Semaphore::new(config.limits.concurrency));
 
     tracing::info!(
-        mode = "shadow",
+        mode = ?config.service.mode,
         classifier = %config.model.classifier_name,
         verifier = %config.model.verifier_name,
         queue_depth = config.limits.queue_depth,
@@ -190,6 +203,15 @@ async fn process_message(
         );
         return Ok(());
     }
+    if config
+        .room
+        .service_member_ids
+        .iter()
+        .any(|member| member == &message.author_id)
+    {
+        tracing::info!(member_id = %message.author_id, "service-authored message ignored");
+        return Ok(());
+    }
     let is_protected = config
         .room
         .protected_member_ids
@@ -210,6 +232,7 @@ async fn process_message(
             tenure: &tenure,
             trust_tier,
             active_warning: None,
+            moderator_member_ids: &config.room.protected_member_ids,
         },
         payload_limit as usize,
     )?;
@@ -269,11 +292,22 @@ async fn process_message(
         0
     } else {
         state.record_policy_observation(
+            POLICY_VERSION,
             &message.room_owner,
             &message.author_id,
             classifier.classification.category,
             message.first_observed_at,
             Duration::hours(config.policy.warning_window_hours as i64),
+        )?
+    };
+    let active_warning = if classifier.classification.category == Category::None {
+        None
+    } else {
+        state.active_warning(
+            &message.room_owner,
+            &message.author_id,
+            classifier.classification.category,
+            message.first_observed_at,
         )?
     };
     let projected_action = decide(
@@ -282,9 +316,9 @@ async fn process_message(
             verifier: verifier.as_ref().map(|result| &result.classification),
             trust_tier,
             prior_category_observations: prior_observations,
-            has_active_warning: false,
-            // Shadow projection only. Enforcement requires a fresh River
-            // membership preflight and never relies on this assumption.
+            has_active_warning: active_warning.is_some(),
+            // Ban execution remains disabled. A future enforcer must replace
+            // this projection with a fresh River membership preflight.
             descendant_count: 0,
         },
         &config.policy,
@@ -349,9 +383,175 @@ async fn process_message(
         day_cost_microusd = budget_status.day_reserved_microusd,
         month_cost_microusd = budget_status.month_reserved_microusd,
         requests_today = budget_status.requests_today,
-        "shadow moderation decision"
+        "moderation decision"
+    );
+    if config.service.mode == Mode::Warn {
+        schedule_warning_if_eligible(
+            &config,
+            &state,
+            &message,
+            &decision_id,
+            classifier.classification.category,
+            projected_action,
+        )?;
+    }
+    Ok(())
+}
+
+fn schedule_warning_if_eligible(
+    config: &Config,
+    state: &ModerationState,
+    message: &VerifiedMessage,
+    decision_id: &str,
+    category: Category,
+    action: crate::policy::PolicyAction,
+) -> Result<()> {
+    let Some(activation_at) = config.service.activation_at else {
+        anyhow::bail!("warn mode has no activation cutoff");
+    };
+    if message.first_observed_at < activation_at {
+        return Ok(());
+    }
+    let action = match action {
+        crate::policy::PolicyAction::NudgeAsModerator => LowSeverityAction::Nudge,
+        crate::policy::PolicyAction::WarnAsModerator => LowSeverityAction::FormalWarning,
+        _ => return Ok(()),
+    };
+    let pending = PendingLowSeverity {
+        decision_id: decision_id.to_owned(),
+        room_owner: message.room_owner.clone(),
+        target_message_id: message.message_id.clone(),
+        target_member_id: message.author_id.clone(),
+        classified_content_hash: message.content_hash(),
+        action,
+        category,
+        created_at: message.first_observed_at,
+        execute_after: message.first_observed_at
+            + Duration::seconds(config.policy.low_severity_grace_seconds as i64),
+        cancelled_by_member_id: None,
+        completed_at: None,
+        outcome: None,
+    };
+    let scheduled = state.schedule_low_severity(&pending)?;
+    tracing::info!(
+        decision_id,
+        member_id = %message.author_id,
+        message_hash = %short_hash(&message.message_id),
+        scheduled,
+        execute_after = %pending.execute_after,
+        "low-severity public action considered"
     );
     Ok(())
+}
+
+async fn warning_loop(config: Arc<Config>, state: Arc<ModerationState>) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let now = Utc::now();
+        let claimed = state.claim_due_low_severity(
+            now,
+            Duration::seconds(config.policy.global_action_interval_seconds as i64),
+            Duration::hours(config.policy.member_action_cooldown_hours as i64),
+            Duration::seconds(config.policy.max_pending_action_age_seconds as i64),
+        );
+        let pending = match claimed {
+            Ok(Some(pending)) => pending,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::error!(error = %format!("{error:#}"), "warning queue claim failed");
+                continue;
+            }
+        };
+        match state.message_is_current(
+            &pending.room_owner,
+            &pending.target_message_id,
+            &pending.target_member_id,
+            &pending.classified_content_hash,
+        ) {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::info!(
+                    decision_id = %pending.decision_id,
+                    message_id = %pending.target_message_id,
+                    "suppressed warning because the classified message changed or was deleted"
+                );
+                if let Err(error) = state.complete_low_severity(
+                    &pending,
+                    LowSeverityOutcome::SuppressedChangedOrDeleted,
+                    Utc::now(),
+                ) {
+                    tracing::error!(error = %format!("{error:#}"), "failed to record suppressed warning");
+                }
+                continue;
+            }
+            Err(error) => {
+                tracing::error!(
+                    error = %format!("{error:#}"),
+                    decision_id = %pending.decision_id,
+                    "failed warning message-state preflight; refusing to send"
+                );
+                if let Err(error) =
+                    state.complete_low_severity(&pending, LowSeverityOutcome::Failed, Utc::now())
+                {
+                    tracing::error!(error = %format!("{error:#}"), "failed to record warning preflight failure");
+                }
+                continue;
+            }
+        }
+        let text = match pending.action {
+            LowSeverityAction::Nudge => fixed_nudge(pending.category),
+            LowSeverityAction::FormalWarning => fixed_warning(pending.category),
+        };
+        match send_fixed_reply(
+            &config.river,
+            &pending.room_owner,
+            &pending.target_message_id,
+            text,
+        )
+        .await
+        {
+            Ok(()) => {
+                if pending.action == LowSeverityAction::FormalWarning {
+                    let warning = WarningRecord {
+                        room_owner: pending.room_owner.clone(),
+                        member_id: pending.target_member_id.clone(),
+                        category: pending.category,
+                        warning_group: crate::state::warning_group(pending.category).into(),
+                        warned_at: Utc::now(),
+                        expires_at: Utc::now()
+                            + Duration::hours(config.policy.warning_window_hours as i64),
+                        triggering_message_id: pending.target_message_id.clone(),
+                    };
+                    if let Err(error) = state.record_warning(&warning) {
+                        tracing::error!(error = %format!("{error:#}"), "sent warning but failed to record warning state");
+                    }
+                }
+                if let Err(error) =
+                    state.complete_low_severity(&pending, LowSeverityOutcome::Sent, Utc::now())
+                {
+                    tracing::error!(error = %format!("{error:#}"), "sent warning but failed to finalize action record");
+                }
+                tracing::warn!(
+                    decision_id = %pending.decision_id,
+                    member_id = %pending.target_member_id,
+                    message_hash = %short_hash(&pending.target_message_id),
+                    action = ?pending.action,
+                    category = ?pending.category,
+                    "public moderation reply sent"
+                );
+            }
+            Err(error) => {
+                let _ =
+                    state.complete_low_severity(&pending, LowSeverityOutcome::Failed, Utc::now());
+                tracing::error!(
+                    decision_id = %pending.decision_id,
+                    member_id = %pending.target_member_id,
+                    error = %format!("{error:#}"),
+                    "public moderation reply failed and was not retried"
+                );
+            }
+        }
+    }
 }
 
 fn reserve(

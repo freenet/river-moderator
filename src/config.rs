@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -124,6 +125,16 @@ impl Config {
             self.river.config_dir.is_absolute(),
             "River config_dir must be absolute"
         );
+        if self.service.mode == Mode::Warn {
+            anyhow::ensure!(
+                self.service.activation_at.is_some(),
+                "warn mode requires an explicit activation_at cutoff"
+            );
+            anyhow::ensure!(
+                !self.room.service_member_ids.is_empty(),
+                "warn mode requires at least one service member ID"
+            );
+        }
         anyhow::ensure!(
             self.river.max_event_bytes > 0 && self.river.max_event_bytes <= 1_048_576,
             "max_event_bytes is invalid"
@@ -146,6 +157,12 @@ impl Config {
         anyhow::ensure!(
             self.policy.regular_after_messages <= self.policy.established_after_messages,
             "established message count must not be below regular message count"
+        );
+        anyhow::ensure!(
+            self.policy.global_action_interval_seconds > 0
+                && self.policy.member_action_cooldown_hours > 0
+                && self.policy.max_pending_action_age_seconds > 0,
+            "action cooldowns and maximum pending age must be positive"
         );
         anyhow::ensure!(
             self.policy.nudge_confidence_millionths <= self.policy.warning_confidence_millionths
@@ -182,6 +199,8 @@ impl Mode {
 pub struct ServiceConfig {
     pub mode: Mode,
     pub state_database: PathBuf,
+    #[serde(default)]
+    pub activation_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -212,6 +231,8 @@ pub struct RoomConfig {
     pub topic: String,
     #[serde(default)]
     pub protected_member_ids: Vec<String>,
+    #[serde(default)]
+    pub service_member_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -311,6 +332,9 @@ pub struct LimitConfig {
 pub struct PolicyConfig {
     pub warning_window_hours: u64,
     pub low_severity_grace_seconds: u64,
+    pub global_action_interval_seconds: u64,
+    pub member_action_cooldown_hours: u64,
+    pub max_pending_action_age_seconds: u64,
     pub max_ban_descendants: usize,
     pub ban_confidence_millionths: u32,
     pub deputy_ban_confidence_millionths: u32,

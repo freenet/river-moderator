@@ -2,15 +2,12 @@
 
 Real-time, budget-bounded LLM moderation for [River](https://github.com/freenet/river) rooms.
 
-The daemon is suitable for a production **shadow-mode** rollout: it subscribes to
+The daemon supports production shadow and warning modes. It subscribes to
 verified River message events, evaluates them, and writes a private decision
-audit without posting messages or changing room membership. The executable
-rejects warning and enforcement modes at startup, and the shadow service should
-receive only an ordinary River member identity with no deputy authority.
-
-Automatic warnings and bans are deliberately not implemented yet. See the
-[threat model](docs/THREAT_MODEL.md) for the security invariants and release
-gates that must be satisfied before an enforcer is introduced.
+audit. Warning mode may post only fixed, source-defined replies from an ordinary
+River member identity with no deputy authority. Automatic bans remain disabled
+until a separately isolated enforcer satisfies the remaining
+[threat-model](docs/THREAT_MODEL.md) release gates.
 
 The initial policy is designed for a highly moderated project room:
 
@@ -19,9 +16,13 @@ The initial policy is designed for a highly moderated project room:
 - Severe harmful behavior can result in an immediate ban.
 - Disruptive behavior receives a warning, then a ban if it continues.
 
-The system evaluates behavior and impact rather than trying to infer intent. It starts in shadow mode, has hard persistent spending limits, and treats every room message as hostile input.
+The system evaluates behavior and impact rather than trying to infer intent. It
+starts in shadow mode, has hard persistent spending limits, and treats every
+room message as hostile input. Enabling warning mode requires an explicit UTC
+activation cutoff: messages first observed before that time can never be queued
+for a public action.
 
-## Production shadow service
+## Production service
 
 The reference files in [`packaging/systemd`](packaging/systemd) run the service
 as the dedicated `river-moderator` user. The service uses:
@@ -56,3 +57,9 @@ bounded context is retained only in the private audit file for operator review.
 The standalone `budget-status` command is for offline inspection while the
 daemon is stopped; the database intentionally permits only one process to hold
 its lock.
+
+Warning mode adds a grace period for human moderator intervention, persists a
+global public-action interval and per-member cooldown across restarts, drops
+stale queued actions, and rechecks the classified message immediately before
+posting. Edited, deleted, missing, or author-mismatched messages are suppressed.
+Model output cannot choose reply text, command arguments, or targets.

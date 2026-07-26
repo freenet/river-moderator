@@ -1,5 +1,5 @@
 [Unit]
-Description=River room moderator (shadow mode)
+Description=River room moderator
 After=network-online.target freenet-gateway.service
 Wants=network-online.target freenet-gateway.service
 
