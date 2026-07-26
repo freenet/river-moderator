@@ -1028,12 +1028,32 @@ fn is_high_signal_message(
                 .filter(|character| character.is_ascii_alphanumeric())
                 .count()
                 < message.content.chars().count() / 4)
+        || compression_ratio_is_suspicious(&message.content)
         || {
             let lower = message.content.to_ascii_lowercase();
             ["dm me", "message me", "cash app", "send crypto"]
                 .iter()
                 .any(|needle| lower.contains(needle))
         }
+}
+
+/// Detect pathological repetition cheaply. This is a positive routing signal:
+/// a normal ratio never suppresses any other moderation path.
+fn compression_ratio_is_suspicious(content: &str) -> bool {
+    const MIN_BYTES: usize = 512;
+    const MAX_RATIO: f64 = 0.50;
+    if content.len() < MIN_BYTES {
+        return false;
+    }
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    use std::io::Write;
+    if encoder.write_all(content.as_bytes()).is_err() {
+        return false;
+    }
+    let Ok(compressed) = encoder.finish() else {
+        return false;
+    };
+    (compressed.len() as f64 / content.len() as f64) < MAX_RATIO
 }
 
 #[cfg(test)]
@@ -1078,5 +1098,11 @@ mod tests {
         report.content = "spam".into();
         report.reply_to_author_id = None;
         assert!(!is_spam_report(&report));
+    }
+
+    #[test]
+    fn compression_signal_catches_long_repetition_but_not_short_text() {
+        assert!(!compression_ratio_is_suspicious(&"x".repeat(511)));
+        assert!(compression_ratio_is_suspicious(&"repeat me ".repeat(100)));
     }
 }
