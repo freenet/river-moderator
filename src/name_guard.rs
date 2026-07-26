@@ -100,14 +100,34 @@ pub fn inspect(nickname: &str, protected_nicknames: &[String]) -> NameGuardActio
         };
     }
 
-    let compact = normalized.replace(' ', "");
-    if SEVERE_NAME_PATTERNS.is_match(&normalized) || SEVERE_NAME_PATTERNS.is_match(&compact) {
+    if contains_severe_slur(nickname) {
         return NameGuardAction::Ban {
             reason: "unmistakable hateful or abusive nickname".into(),
         };
     }
 
     NameGuardAction::Observe
+}
+
+/// Whether `text` contains a slur the severe-name patterns recognise.
+///
+/// Shared by the join-name guard and the message router. On the message side
+/// this is a routing signal only: it decides that a message is worth a model
+/// call, exactly like a duplicate flood or an oversized wall of text, and the
+/// classifier and verifier still make every decision from the full message and
+/// its surrounding context.
+///
+/// Routing on content matters because the router was otherwise blind to what a
+/// message says. On 2026-07-26 a member posted "redditfag" and then "tranny
+/// faggots love to censor..." and neither drew any review; the account was only
+/// examined four minutes later when another member reported it by hand.
+pub fn contains_severe_slur(text: &str) -> bool {
+    let normalized = normalize(text);
+    if normalized.is_empty() {
+        return false;
+    }
+    let compact = normalized.replace(' ', "");
+    SEVERE_NAME_PATTERNS.is_match(&normalized) || SEVERE_NAME_PATTERNS.is_match(&compact)
 }
 
 pub fn normalize(value: &str) -> String {

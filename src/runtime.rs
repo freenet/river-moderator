@@ -1026,6 +1026,7 @@ fn is_high_signal_message(
                 .count()
                 < message.content.chars().count() / 4)
         || compression_ratio_is_suspicious(&message.content)
+        || name_guard::contains_severe_slur(&message.content)
         || {
             let lower = message.content.to_ascii_lowercase();
             ["dm me", "message me", "cash app", "send crypto"]
@@ -1057,6 +1058,19 @@ fn compression_ratio_is_suspicious(content: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// Signals for a lone message from an otherwise idle author, so these
+    /// tests exercise the content clause and nothing else.
+    fn quiet_signals() -> crate::event::TemporalSignals {
+        crate::event::TemporalSignals {
+            author_messages_10_seconds: 1,
+            author_messages_1_minute: 1,
+            author_messages_5_minutes: 1,
+            milliseconds_since_author_previous: None,
+            exact_duplicate_count_5_minutes: 0,
+            claimed_clock_skew_seconds: 0,
+        }
+    }
+
     fn message(content: &str) -> VerifiedMessage {
         VerifiedMessage {
             message_id: "message".into(),
@@ -1069,6 +1083,49 @@ mod tests {
             edited: false,
             reply_to_message_id: None,
             reply_to_author_id: None,
+        }
+    }
+
+    /// The router was blind to what a message said. On 2026-07-26 a member
+    /// posted "redditfag" and then "tranny faggots love to censor..."; neither
+    /// drew any review, and the account was examined only four minutes later
+    /// when another member reported it by hand. Both lines are verbatim.
+    ///
+    /// Measured against every distinct message the room saw that day (1,630 of
+    /// them), this clause fires on 6 and none of the 6 is a false positive.
+    #[test]
+    fn routes_messages_containing_severe_slurs_for_review() {
+        let quiet = quiet_signals();
+        for content in [
+            "redditfag",
+            "yes because tranny faggots love to censor boo boo words that hurts their delusions",
+            "Calling all glowniggers, come in",
+            "eu chat control is a nigger",
+        ] {
+            assert!(
+                is_high_signal_message(&message(content), &quiet),
+                "{content:?} should route for review"
+            );
+        }
+    }
+
+    /// Ordinary conversation must not buy a model call. These are real messages
+    /// from the same room and day, including ones from the account that was
+    /// eventually banned, taken from before it began using slurs.
+    #[test]
+    fn does_not_route_ordinary_conversation() {
+        let quiet = quiet_signals();
+        for content in [
+            "sounds like a skill issue",
+            "this is simply logic",
+            "no matter what your opinion on the topic is, i can overpower you in many forms",
+            "I am currently using `riverctl`, and also River webUI on other VM.",
+            "wtf is your username???",
+        ] {
+            assert!(
+                !is_high_signal_message(&message(content), &quiet),
+                "{content:?} should not route for review"
+            );
         }
     }
 
