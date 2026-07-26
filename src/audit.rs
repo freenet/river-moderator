@@ -59,6 +59,8 @@ pub struct ModelEvidence {
 #[serde(deny_unknown_fields)]
 pub struct MembershipEvidence {
     pub target_member_id: String,
+    /// Base58 Ed25519 verifying key from fresh River membership state.
+    pub target_verifying_key: Option<String>,
     pub target_nickname: String,
     pub trust_tier: TrustTier,
     pub first_observed_at: DateTime<Utc>,
@@ -209,6 +211,7 @@ mod tests {
             first_observed_at: now,
             edited: false,
             reply_to_message_id: None,
+            reply_to_author_id: None,
         }
     }
 
@@ -253,6 +256,7 @@ mod tests {
             },
             membership: MembershipEvidence {
                 target_member_id: trigger.author_id.clone(),
+                target_verifying_key: Some("full-base58-verifying-key".into()),
                 target_nickname: trigger.nickname.clone(),
                 trust_tier: TrustTier::Probationary,
                 first_observed_at: trigger.first_observed_at,

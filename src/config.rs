@@ -230,6 +230,7 @@ pub struct LimitConfig {
 #[serde(deny_unknown_fields)]
 pub struct PolicyConfig {
     pub warning_window_hours: u64,
+    pub low_severity_grace_seconds: u64,
     pub max_ban_descendants: usize,
     pub ban_confidence_millionths: u32,
     pub deputy_ban_confidence_millionths: u32,

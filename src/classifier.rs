@@ -196,6 +196,7 @@ mod tests {
             first_observed_at: now,
             edited: false,
             reply_to_message_id: None,
+            reply_to_author_id: None,
         }
     }
 

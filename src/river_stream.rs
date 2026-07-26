@@ -49,7 +49,7 @@ struct WireMessage {
     #[serde(default)]
     edited: bool,
     #[serde(default)]
-    reply_to: Option<serde_json::Value>,
+    reply_to: Option<WireReply>,
     #[serde(default)]
     reactions: HashMap<String, usize>,
 }
@@ -65,6 +65,18 @@ struct WireDelete {
 #[derive(Debug, Deserialize)]
 struct WireReaction {
     message_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireReply {
+    /// Present in River versions with verified reply-target JSON support.
+    message_id: Option<String>,
+    /// Present in River versions with verified reply-target JSON support.
+    author_id: Option<String>,
+    #[serde(default)]
+    author: Option<String>,
+    #[serde(default)]
+    preview: Option<String>,
 }
 
 pub fn parse_event(line: &[u8], observed_at: DateTime<Utc>) -> Result<RoomEvent> {
@@ -98,10 +110,16 @@ fn convert_message(
     observed_at: DateTime<Utc>,
     is_edit: bool,
 ) -> VerifiedMessage {
-    // `reply_to` currently carries display context rather than a verified target
-    // message ID. Do not infer an identity from it. Reactions are intentionally
-    // ignored by text moderation.
-    let _ = message.reply_to;
+    // Older River versions carry display context only. Missing verified IDs stay
+    // `None`; never infer identity from nickname or preview text.
+    let (reply_to_message_id, reply_to_author_id) = message
+        .reply_to
+        .map(|reply| {
+            let _ = reply.author;
+            let _ = reply.preview;
+            (reply.message_id, reply.author_id)
+        })
+        .unwrap_or_default();
     let _ = message.reactions;
     VerifiedMessage {
         message_id: message.message_id,
@@ -112,7 +130,8 @@ fn convert_message(
         author_claimed_at: message.timestamp,
         first_observed_at: observed_at,
         edited: is_edit || message.edited,
-        reply_to_message_id: None,
+        reply_to_message_id,
+        reply_to_author_id,
     }
 }
 
@@ -245,6 +264,20 @@ mod tests {
         };
         assert_eq!(message.author_id, "authenticated-author");
         assert_eq!(message.reply_to_message_id, None);
+    }
+
+    #[test]
+    fn parses_only_verified_reply_identifiers() {
+        let observed = Utc::now();
+        let line = br#"{"type":"message","message_id":"reply","room":"owner","author":"member","nickname":"n","content":"handled","timestamp":"2026-07-25T12:00:00Z","edited":false,"reply_to":{"author":"Room Owner","author_id":"target-author","message_id":"target-message","preview":"text"}}"#;
+        let RoomEvent::Message(message) = parse_event(line, observed).unwrap() else {
+            panic!("wrong event type");
+        };
+        assert_eq!(
+            message.reply_to_message_id.as_deref(),
+            Some("target-message")
+        );
+        assert_eq!(message.reply_to_author_id.as_deref(), Some("target-author"));
     }
 
     #[test]

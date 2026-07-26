@@ -15,6 +15,7 @@ pub struct VerifiedMessage {
     pub first_observed_at: DateTime<Utc>,
     pub edited: bool,
     pub reply_to_message_id: Option<String>,
+    pub reply_to_author_id: Option<String>,
 }
 
 impl VerifiedMessage {
@@ -105,6 +106,7 @@ mod tests {
             first_observed_at: observed,
             edited: false,
             reply_to_message_id: None,
+            reply_to_author_id: None,
         }
     }
 

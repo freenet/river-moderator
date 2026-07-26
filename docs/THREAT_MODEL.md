@@ -37,6 +37,8 @@ The classifier returns one of five closed verdicts:
 
 It also selects a closed category, confidence, and a short audit reason. Intent is not an input to enforcement. `nudge_conduct` is a visible but non-punitive reminder for a mildly rude or dismissive formulation; it does not start the warning-to-ban clock. Repeated nudges in the same conduct group escalate to a formal warning.
 
+Low-severity nudges and warnings have a configurable grace period (60 seconds by default). If the Room Owner or a current deputy sends an authenticated reply to the exact target message during that period, trusted code cancels the automated action and records `handled_by_moderator`. Nicknames and reply preview text are not sufficient; cancellation requires River's verified reply target message ID and responder member ID. Severe-harm actions do not wait for this grace period.
+
 `warn_disruptive` covers sustained off-topic discussion, rudeness, incivility, ad hominem or other personal attacks below the severe-harm threshold, repetitive promotion, monopolizing the room, inflammatory derailment, excessive posting, and persistently harmful misinformation. Members may disagree strongly and criticize ideas, code, projects, and decisions, but must do so politely. Repetition after a category-specific warning may be escalated to a ban.
 
 `ban_severe_harm` covers spam, scams, phishing, malware, doxxing, credible threats, targeted harassment or hate, impersonation, sexual exploitation, and extreme flooding. A severe outcome does not require proof of malicious intent.
@@ -89,7 +91,7 @@ The enforcer:
 7. uses fixed, operator-reviewed warning text; and
 8. records an idempotency key before submitting an action.
 
-Before any ban submission, the service durably appends a structured pending-decision record. It uses the target's full River member ID and includes the trigger and bounded context, claimed and observed timestamps, temporal signals, normalized and model reasons, warning history, model/prompt versions, usage and reserved cost, inviter and ancestor IDs, the full descendant removal set, and the content hash that was classified. A second record captures the River submission outcome. This supports later correlation with invite-issuance logs by full member ID.
+Before any ban submission, the service durably appends a structured pending-decision record. It stores the target's canonical River `MemberId` plus the full Ed25519 verifying key from fresh membership state, and includes the trigger and bounded context, claimed and observed timestamps, temporal signals, normalized and model reasons, warning history, model/prompt versions, usage and reserved cost, inviter and ancestor IDs, the full descendant removal set, and the content hash that was classified. A second record captures the River submission outcome. This supports later correlation with invite-issuance logs by canonical member ID or verifying key.
 
 Raw audit context is stored in a mode-0600 local audit file with bounded size and retention. Ordinary service logs contain member IDs, content hashes, categories, and outcomes but no complete message bodies.
 

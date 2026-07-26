@@ -224,6 +224,7 @@ mod tests {
     fn policy() -> PolicyConfig {
         PolicyConfig {
             warning_window_hours: 24,
+            low_severity_grace_seconds: 60,
             max_ban_descendants: 0,
             ban_confidence_millionths: 980_000,
             deputy_ban_confidence_millionths: 995_000,

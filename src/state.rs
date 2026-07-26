@@ -12,6 +12,8 @@ const HISTORY: TableDefinition<&str, &[u8]> = TableDefinition::new("room_history
 const WARNINGS: TableDefinition<&str, &[u8]> = TableDefinition::new("moderation_warnings_v1");
 const OBSERVATIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("policy_observations_v1");
 const PENDING_BANS: TableDefinition<&str, &[u8]> = TableDefinition::new("pending_bans_v1");
+const PENDING_LOW_SEVERITY: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("pending_low_severity_v1");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EventDisposition {
@@ -51,6 +53,25 @@ pub struct PendingBan {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LowSeverityAction {
+    Nudge,
+    FormalWarning,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PendingLowSeverity {
+    pub decision_id: String,
+    pub room_owner: String,
+    pub target_message_id: String,
+    pub target_member_id: String,
+    pub classified_content_hash: String,
+    pub action: LowSeverityAction,
+    pub execute_after: DateTime<Utc>,
+    pub cancelled_by_member_id: Option<String>,
+}
+
 pub struct ModerationState {
     database: Arc<Database>,
 }
@@ -67,6 +88,7 @@ impl ModerationState {
         write.open_table(WARNINGS)?;
         write.open_table(OBSERVATIONS)?;
         write.open_table(PENDING_BANS)?;
+        write.open_table(PENDING_LOW_SEVERITY)?;
         write.commit()?;
         Ok(Self { database })
     }
@@ -302,6 +324,67 @@ impl ModerationState {
             .map(|entry| serde_json::from_slice(entry.value()).context("invalid pending ban"))
             .transpose()
     }
+
+    pub fn schedule_low_severity(&self, pending: &PendingLowSeverity) -> Result<()> {
+        let key = event_key(&pending.room_owner, &pending.target_message_id);
+        let encoded = serde_json::to_vec(pending)?;
+        let write = self.database.begin_write()?;
+        let mut table = write.open_table(PENDING_LOW_SEVERITY)?;
+        anyhow::ensure!(
+            table.get(key.as_str())?.is_none(),
+            "message already has a pending low-severity action"
+        );
+        table.insert(key.as_str(), encoded.as_slice())?;
+        drop(table);
+        write.commit()?;
+        Ok(())
+    }
+
+    /// Cancel only when a locally configured moderator authored an authenticated
+    /// reply to the exact target message. Nicknames and preview text are ignored.
+    pub fn cancel_if_handled_by_moderator(
+        &self,
+        room_owner: &str,
+        reply_target_message_id: &str,
+        responder_member_id: &str,
+        moderator_member_ids: &[String],
+    ) -> Result<bool> {
+        if !moderator_member_ids
+            .iter()
+            .any(|member| member == responder_member_id)
+        {
+            return Ok(false);
+        }
+        let key = event_key(room_owner, reply_target_message_id);
+        let write = self.database.begin_write()?;
+        let mut table = write.open_table(PENDING_LOW_SEVERITY)?;
+        let existing = table.get(key.as_str())?;
+        let Some(value) = existing.as_ref() else {
+            return Ok(false);
+        };
+        let mut pending: PendingLowSeverity = serde_json::from_slice(value.value())?;
+        drop(existing);
+        pending.cancelled_by_member_id = Some(responder_member_id.to_owned());
+        let encoded = serde_json::to_vec(&pending)?;
+        table.insert(key.as_str(), encoded.as_slice())?;
+        drop(table);
+        write.commit()?;
+        Ok(true)
+    }
+
+    pub fn due_low_severity(&self, now: DateTime<Utc>) -> Result<Vec<PendingLowSeverity>> {
+        let read = self.database.begin_read()?;
+        let table = read.open_table(PENDING_LOW_SEVERITY)?;
+        let mut due = Vec::new();
+        for entry in table.iter()? {
+            let (_, value) = entry?;
+            let pending: PendingLowSeverity = serde_json::from_slice(value.value())?;
+            if pending.cancelled_by_member_id.is_none() && pending.execute_after <= now {
+                due.push(pending);
+            }
+        }
+        Ok(due)
+    }
 }
 
 fn event_key(room: &str, message: &str) -> String {
@@ -352,6 +435,7 @@ mod tests {
             first_observed_at: observed,
             edited: false,
             reply_to_message_id: None,
+            reply_to_author_id: None,
         }
     }
 
@@ -448,5 +532,43 @@ mod tests {
                 .decision_id,
             "decision"
         );
+    }
+
+    #[test]
+    fn authenticated_moderator_reply_cancels_delayed_nudge() {
+        let dir = tempdir().unwrap();
+        let state = ModerationState::open(&dir.path().join("state.redb")).unwrap();
+        state
+            .schedule_low_severity(&PendingLowSeverity {
+                decision_id: "d".into(),
+                room_owner: "room".into(),
+                target_message_id: "target-message".into(),
+                target_member_id: "new-member".into(),
+                classified_content_hash: "hash".into(),
+                action: LowSeverityAction::Nudge,
+                execute_after: at(1) + Duration::seconds(60),
+                cancelled_by_member_id: None,
+            })
+            .unwrap();
+        assert!(!state
+            .cancel_if_handled_by_moderator(
+                "room",
+                "target-message",
+                "nickname-spoofing-attacker",
+                &["owner-id".into()],
+            )
+            .unwrap());
+        assert!(state
+            .cancel_if_handled_by_moderator(
+                "room",
+                "target-message",
+                "owner-id",
+                &["owner-id".into()],
+            )
+            .unwrap());
+        assert!(state
+            .due_low_severity(at(1) + Duration::seconds(120))
+            .unwrap()
+            .is_empty());
     }
 }
