@@ -79,3 +79,11 @@ member's first message. It normalizes Unicode, strips zero-width characters,
 checks severe-name and protected-identity patterns, and sends only candidates
 to the classifier and independent verifier. The pattern match never bans by
 itself; ambiguous names remain log-only.
+
+For high-volume rooms, ordinary messages are recorded without a provider call.
+An exact `spam` reply to a message routes that target plus bounded surrounding
+context and timestamps to the classifier/verifier. Deterministic high-signal
+events such as extreme bursts, duplicate floods, oversized ASCII walls, and
+common unsolicited-contact lures also trigger review. Five reports from one
+member within sixty seconds are treated as report flooding and enter the same
+guarded ban path.

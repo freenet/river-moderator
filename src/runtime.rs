@@ -190,14 +190,104 @@ async fn process_message(
     budgets: Arc<BudgetLedger>,
     audits: RuntimeAudits,
     model: Arc<OpenAiModelClient>,
-    message: VerifiedMessage,
+    incoming_message: VerifiedMessage,
 ) -> Result<()> {
-    let context = state.context(
-        &message.room_owner,
-        &message.message_id,
+    let incoming_context = state.context(
+        &incoming_message.room_owner,
+        &incoming_message.message_id,
         config.audit.max_context_messages.saturating_sub(8),
         8,
     )?;
+    let is_report = is_spam_report(&incoming_message);
+    if is_report {
+        let recent_reports = incoming_context
+            .iter()
+            .filter(|candidate| {
+                candidate.author_id == incoming_message.author_id
+                    && is_spam_report(candidate)
+                    && incoming_message
+                        .first_observed_at
+                        .signed_duration_since(candidate.first_observed_at)
+                        .num_seconds()
+                        .abs()
+                        <= 60
+            })
+            .count()
+            + 1;
+        if recent_reports >= 5 {
+            let tenure = members.observe(
+                &incoming_message.room_owner,
+                &incoming_message.author_id,
+                incoming_message.first_observed_at,
+            )?;
+            let is_protected = config
+                .room
+                .protected_member_ids
+                .iter()
+                .any(|member| member == &incoming_message.author_id);
+            let decision = report_abuse_decision(
+                &config,
+                &incoming_message,
+                incoming_context.clone(),
+                tenure,
+                is_protected,
+                recent_reports,
+            );
+            audits.decisions.append(
+                &decision,
+                config.audit.max_context_messages,
+                config.audit.max_message_bytes,
+            )?;
+            tracing::error!(
+                decision_id = %decision.decision_id,
+                member_id = %incoming_message.author_id,
+                recent_reports,
+                "report flooding classified as severe abuse"
+            );
+            if config.service.mode == Mode::Enforce {
+                enforce_severe_ban(&config, &state, &audits.bans, &decision).await?;
+            }
+            return Ok(());
+        }
+    }
+    let report_target = if is_report {
+        let target_id = incoming_message
+            .reply_to_message_id
+            .as_deref()
+            .expect("spam report requires a reply target");
+        let Some(target) = incoming_context
+            .iter()
+            .find(|candidate| candidate.message_id == target_id)
+            .cloned()
+        else {
+            tracing::warn!(
+                reporter_id = %incoming_message.author_id,
+                target_message_id = %target_id,
+                "spam report target is outside retained context"
+            );
+            return Ok(());
+        };
+        tracing::info!(
+            reporter_id = %incoming_message.author_id,
+            target_member_id = %target.author_id,
+            target_message_hash = %short_hash(&target.content_hash()),
+            "spam report accepted for moderation review"
+        );
+        Some(target)
+    } else {
+        None
+    };
+    let message = report_target.unwrap_or_else(|| incoming_message.clone());
+    let context = if is_report {
+        state.context(
+            &message.room_owner,
+            &message.message_id,
+            config.audit.max_context_messages.saturating_sub(8),
+            8,
+        )?
+    } else {
+        incoming_context
+    };
     let signals = temporal_signals(&message, &context);
     let tenure = members.observe(
         &message.room_owner,
@@ -219,6 +309,17 @@ async fn process_message(
 
     if is_service {
         tracing::info!(member_id = %message.author_id, "service-authored message ignored");
+        return Ok(());
+    }
+    if !is_routine_join_notice(&message)
+        && !is_high_signal_message(&message, &signals)
+        && !is_report
+    {
+        tracing::debug!(
+            member_id = %message.author_id,
+            content_hash = %short_hash(&message.content_hash()),
+            "ordinary message recorded without model call"
+        );
         return Ok(());
     }
     let join_name_candidate = if is_routine_join_notice(&message) {
@@ -640,6 +741,54 @@ fn ban_record(
     }
 }
 
+fn report_abuse_decision(
+    config: &Config,
+    message: &VerifiedMessage,
+    context: Vec<VerifiedMessage>,
+    tenure: crate::membership::MemberTenure,
+    is_protected: bool,
+    recent_reports: usize,
+) -> DecisionAuditRecord {
+    let trust_tier = tenure.trust_tier(message.first_observed_at, is_protected, &config.policy);
+    let classification = crate::verdict::Classification {
+        verdict: Verdict::BanSevereHarm,
+        category: Category::Spam,
+        confidence_millionths: 1_000_000,
+        reason: format!("Report flooding: {recent_reports} reports in one minute."),
+    };
+    DecisionAuditRecord {
+        schema_version: DECISION_AUDIT_SCHEMA_VERSION,
+        decision_id: short_hash(&format!(
+            "report-abuse:{}:{}",
+            message.room_owner, message.author_id
+        )),
+        recorded_at: Utc::now(),
+        mode: config.service.mode,
+        room_owner: message.room_owner.clone(),
+        trigger: message.clone(),
+        context,
+        temporal_signals: temporal_signals(message, &[]),
+        tenure,
+        trust_tier,
+        classifier_model: "report-abuse-guard".into(),
+        verifier_model: None,
+        classifier: classification,
+        verifier: None,
+        classifier_prompt_tokens: 0,
+        classifier_completion_tokens: 0,
+        classifier_cost_microusd: 0,
+        verifier_prompt_tokens: None,
+        verifier_completion_tokens: None,
+        verifier_cost_microusd: None,
+        classifier_latency_ms: 0,
+        verifier_latency_ms: None,
+        day_cost_microusd: 0,
+        month_cost_microusd: 0,
+        projected_action: crate::policy::PolicyAction::BanAsModerator,
+        classified_content_hash: message.content_hash(),
+    }
+}
+
 fn schedule_warning_if_eligible(
     config: &Config,
     state: &ModerationState,
@@ -860,6 +1009,33 @@ fn is_routine_join_notice(message: &VerifiedMessage) -> bool {
         && message.content == "joined the room"
 }
 
+fn is_spam_report(message: &VerifiedMessage) -> bool {
+    message.reply_to_message_id.is_some()
+        && message.reply_to_author_id.is_some()
+        && message.content.trim().eq_ignore_ascii_case("spam")
+}
+
+fn is_high_signal_message(
+    message: &VerifiedMessage,
+    signals: &crate::event::TemporalSignals,
+) -> bool {
+    signals.author_messages_10_seconds >= 10
+        || signals.exact_duplicate_count_5_minutes >= 2
+        || (message.content.len() >= 1024
+            && message
+                .content
+                .chars()
+                .filter(|character| character.is_ascii_alphanumeric())
+                .count()
+                < message.content.chars().count() / 4)
+        || {
+            let lower = message.content.to_ascii_lowercase();
+            ["dm me", "message me", "cash app", "send crypto"]
+                .iter()
+                .any(|needle| lower.contains(needle))
+        }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -889,5 +1065,18 @@ mod tests {
         let mut edited = message("joined the room");
         edited.edited = true;
         assert!(!is_routine_join_notice(&edited));
+    }
+
+    #[test]
+    fn accepts_only_exact_spam_replies_as_reports() {
+        let mut report = message(" spam ");
+        report.reply_to_message_id = Some("target".into());
+        report.reply_to_author_id = Some("author".into());
+        assert!(is_spam_report(&report));
+        report.content = "spam please".into();
+        assert!(!is_spam_report(&report));
+        report.content = "spam".into();
+        report.reply_to_author_id = None;
+        assert!(!is_spam_report(&report));
     }
 }
