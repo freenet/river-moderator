@@ -125,6 +125,18 @@ impl Config {
             self.river.config_dir.is_absolute(),
             "River config_dir must be absolute"
         );
+        anyhow::ensure!(
+            !self.river.expected_contract_key.trim().is_empty(),
+            "expected River contract key is empty"
+        );
+        anyhow::ensure!(
+            self.river.ban_signing_key_file.is_absolute()
+                && self
+                    .river
+                    .ban_signing_key_file
+                    .starts_with("/run/credentials/"),
+            "ban signing key must be a systemd credential path"
+        );
         if self.service.mode == Mode::Warn {
             anyhow::ensure!(
                 self.service.activation_at.is_some(),
@@ -149,6 +161,12 @@ impl Config {
         anyhow::ensure!(
             self.policy.max_ban_descendants == 0 || !self.service.mode.is_enforce(),
             "nonzero descendant collateral is forbidden in enforcement mode"
+        );
+        anyhow::ensure!(
+            self.policy.ban_global_interval_seconds > 0
+                && self.policy.bans_per_hour > 0
+                && self.policy.bans_per_day >= self.policy.bans_per_hour,
+            "automatic ban rate limits are invalid"
         );
         anyhow::ensure!(
             self.policy.regular_after_days <= self.policy.established_after_days,
@@ -219,6 +237,10 @@ pub struct RiverConfig {
     pub riverctl_path: PathBuf,
     pub config_dir: PathBuf,
     pub node_url: String,
+    /// Known production contract key derived from the pinned room WASM and owner.
+    pub expected_contract_key: String,
+    /// Room-owner key exposed only through a systemd credential mount.
+    pub ban_signing_key_file: PathBuf,
     #[serde(default)]
     pub allow_remote_node: bool,
     pub max_event_bytes: usize,
@@ -336,6 +358,9 @@ pub struct PolicyConfig {
     pub member_action_cooldown_hours: u64,
     pub max_pending_action_age_seconds: u64,
     pub max_ban_descendants: usize,
+    pub ban_global_interval_seconds: u64,
+    pub bans_per_hour: u64,
+    pub bans_per_day: u64,
     pub ban_confidence_millionths: u32,
     pub deputy_ban_confidence_millionths: u32,
     pub nudge_confidence_millionths: u32,

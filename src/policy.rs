@@ -101,10 +101,7 @@ fn decide_severe(input: &PolicyInput<'_>, policy: &PolicyConfig) -> PolicyAction
     let Some(verifier) = input.verifier else {
         return PolicyAction::HumanReview;
     };
-    if verifier.validate().is_err()
-        || verifier.verdict != Verdict::BanSevereHarm
-        || !severe_categories_compatible(verifier.category, input.classification.category)
-    {
+    if verifier.validate().is_err() {
         return PolicyAction::HumanReview;
     }
     if input.descendant_count > policy.max_ban_descendants {
@@ -116,21 +113,57 @@ fn decide_severe(input: &PolicyInput<'_>, policy: &PolicyConfig) -> PolicyAction
     } else {
         policy.ban_confidence_millionths
     };
-    if input.classification.confidence_millionths < required_confidence
-        || verifier.confidence_millionths < required_confidence
-    {
-        return PolicyAction::HumanReview;
-    }
-
-    if input.trust_tier == TrustTier::Deputy {
-        if deputy_emergency_category(input.classification.category) {
-            PolicyAction::BanAsOwnerEmergency
+    let immediate_ban = verifier.verdict == Verdict::BanSevereHarm
+        && severe_categories_compatible(verifier.category, input.classification.category)
+        && input.classification.confidence_millionths >= required_confidence
+        && verifier.confidence_millionths >= required_confidence;
+    if immediate_ban {
+        if input.trust_tier == TrustTier::Deputy {
+            if deputy_emergency_category(input.classification.category) {
+                PolicyAction::BanAsOwnerEmergency
+            } else {
+                PolicyAction::HumanReview
+            }
         } else {
-            PolicyAction::HumanReview
+            PolicyAction::BanAsModerator
+        }
+    } else if input.trust_tier != TrustTier::Deputy
+        && borderline_severe_agreement(input.classification, verifier, policy)
+    {
+        if input.has_active_warning {
+            PolicyAction::BanAsModerator
+        } else {
+            PolicyAction::WarnAsModerator
         }
     } else {
-        PolicyAction::BanAsModerator
+        PolicyAction::HumanReview
     }
+}
+
+/// Both models agree that observable abuse occurred, but at least one does not
+/// independently support an immediate severe-harm ban. Warn once, then remove
+/// a comparable repeat while that warning is active.
+fn borderline_severe_agreement(
+    classifier: &Classification,
+    verifier: &Classification,
+    policy: &PolicyConfig,
+) -> bool {
+    classifier.confidence_millionths >= policy.warning_confidence_millionths
+        && verifier.confidence_millionths >= policy.nudge_confidence_millionths
+        && matches!(
+            verifier.verdict,
+            Verdict::NudgeConduct | Verdict::WarnDisruptive | Verdict::BanSevereHarm
+        )
+        && (severe_categories_compatible(classifier.category, verifier.category)
+            || (matches!(classifier.category, Category::Hate | Category::Harassment)
+                && matches!(
+                    verifier.category,
+                    Category::Conduct
+                        | Category::Incivility
+                        | Category::PersonalAttack
+                        | Category::Hate
+                        | Category::Harassment
+                )))
 }
 
 /// Fraudulent wallet/credential lures are reasonably labelled either scam or
@@ -172,6 +205,9 @@ mod tests {
             member_action_cooldown_hours: 24,
             max_pending_action_age_seconds: 300,
             max_ban_descendants: 0,
+            ban_global_interval_seconds: 60,
+            bans_per_hour: 5,
+            bans_per_day: 20,
             ban_confidence_millionths: 980_000,
             deputy_ban_confidence_millionths: 995_000,
             nudge_confidence_millionths: 850_000,
@@ -321,6 +357,25 @@ mod tests {
             has_active_warning: false,
             descendant_count: 0,
         };
+        assert_eq!(decide(&input, &policy()), PolicyAction::HumanReview);
+    }
+
+    #[test]
+    fn borderline_severe_abuse_warns_once_then_bans_on_repeat() {
+        let classifier = classification(Verdict::BanSevereHarm, Category::Hate, 970_000);
+        let verifier = classification(Verdict::WarnDisruptive, Category::Incivility, 860_000);
+        let mut input = PolicyInput {
+            classification: &classifier,
+            verifier: Some(&verifier),
+            trust_tier: TrustTier::Probationary,
+            prior_category_observations: 0,
+            has_active_warning: false,
+            descendant_count: 0,
+        };
+        assert_eq!(decide(&input, &policy()), PolicyAction::WarnAsModerator);
+        input.has_active_warning = true;
+        assert_eq!(decide(&input, &policy()), PolicyAction::BanAsModerator);
+        input.trust_tier = TrustTier::Deputy;
         assert_eq!(decide(&input, &policy()), PolicyAction::HumanReview);
     }
 

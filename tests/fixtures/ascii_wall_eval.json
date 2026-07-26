@@ -1,0 +1,42 @@
+[
+  {
+    "name": "single_ascii_wall_is_disruptive_flooding",
+    "payload": {
+      "room_topic": "Freenet, River, decentralized systems, and closely related project work",
+      "derived_signals": {"author_messages_10_seconds": 1, "author_messages_1_minute": 1, "author_messages_5_minutes": 1},
+      "untrusted_data": {
+        "target_message": {
+          "speaker": "target",
+          "content": ".,:ccclllllllllllllcc:,.\n      .;cllllllllllllllllllllllllllcl,.\n    .clllllllllllllllllllllllllllllllllcl.\n   .lllllllllllllc:,..   ..,:cllllllllllll.\n  ,lllllllllll:,..           ..,:clllllllll,\n .lllllllllc,.                   .,:cllllllll.\n lllllllll,.                       .,:clllllll\n.lllllll:,...                     ...,:cllllll.\n:llllll:.....                     .....:llllll:\n:llllll:,..                         ..,:llllll:\n:llllll:,...                       ...,:llllll:\n:llllll:,.....                   .....,:llllll:\n.lllllll:,.....                 .....,:cllllll.\n lllllllll:,.....             .....,:cllllllll\n .lllllllllc:,......       .....,,:clllllllll.\n  ,lllllllllllc:,..........,,:cllllllllllll,\n   .llllllllllllllllllllllllllllllllllllll.\n    .clllllllllllllllllllllllllllllllllcl.\n      .;cllllllllllllllllllllllllllcl:.\n         .,:ccclllllllllllllcc:,.",
+          "first_observed_at": "2026-07-26T05:58:56Z"
+        },
+        "context": []
+      }
+    },
+    "acceptable_verdicts": ["warn_disruptive"],
+    "acceptable_categories": ["flooding"]
+  },
+  {
+    "name": "brief_surprised_reaction_to_ascii_wall_is_allowed",
+    "payload": {
+      "room_topic": "Freenet, River, decentralized systems, and closely related project work",
+      "derived_signals": {"author_messages_10_seconds": 1, "author_messages_1_minute": 1, "author_messages_5_minutes": 1},
+      "untrusted_data": {
+        "target_message": {
+          "speaker": "target",
+          "content": "Bro, what the fuck is that?",
+          "first_observed_at": "2026-07-26T05:59:09Z"
+        },
+        "context": [
+          {
+            "speaker": "participant_1",
+            "content": "[a 20-line wall of decorative ASCII art]",
+            "first_observed_at": "2026-07-26T05:58:56Z"
+          }
+        ]
+      }
+    },
+    "acceptable_verdicts": ["allow"],
+    "acceptable_categories": ["none"]
+  }
+]

@@ -2,12 +2,12 @@
 
 Real-time, budget-bounded LLM moderation for [River](https://github.com/freenet/river) rooms.
 
-The daemon supports production shadow and warning modes. It subscribes to
-verified River message events, evaluates them, and writes a private decision
-audit. Warning mode may post only fixed, source-defined replies from an ordinary
-River member identity with no deputy authority. Automatic bans remain disabled
-until a separately isolated enforcer satisfies the remaining
-[threat-model](docs/THREAT_MODEL.md) release gates.
+The daemon supports production shadow, warning, and enforcement modes. It
+subscribes to verified River message events, evaluates them, and writes a
+private decision audit. Public replies are fixed, source-defined text posted by
+an ordinary River member identity. In enforcement mode, automatic bans are
+limited to severe-harm decisions independently confirmed by both models, or a
+comparable severe repeat after a warning.
 
 The initial policy is designed for a highly moderated project room:
 
@@ -28,7 +28,8 @@ The reference files in [`packaging/systemd`](packaging/systemd) run the service
 as the dedicated `river-moderator` user. The service uses:
 
 - an ordinary River identity under `/var/lib/river-moderator/river`;
-- a root-owned OpenAI credential loaded through systemd credentials;
+- root-owned OpenAI and room-owner signing credentials loaded through systemd
+  credentials;
 - a root-owned `riverctl` binary with verified reply-target event support;
 - persistent state and budget reservations in
   `/var/lib/river-moderator/state.redb`; and
@@ -63,3 +64,12 @@ global public-action interval and per-member cooldown across restarts, drops
 stale queued actions, and rechecks the classified message immediately before
 posting. Edited, deleted, missing, or author-mismatched messages are suppressed.
 Model output cannot choose reply text, command arguments, or targets.
+
+Enforcement mode leaves ordinary tone and topic decisions in the audit log. It
+posts only severe borderline warnings, without a delayed burst, and bans only
+when the severe-harm gate is satisfied. Before signing a ban, it pins the room
+contract, rechecks the exact member ID and triggering message, refuses deputies
+and members with descendants, protects configured service/operator IDs, and
+applies persistent per-minute, hourly, and daily ban caps. Ban operations are
+fixed CLI calls signed by the configured room-owner credential; untrusted model
+text is never interpreted as a command or command argument.

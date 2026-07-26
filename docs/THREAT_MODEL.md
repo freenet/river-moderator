@@ -79,18 +79,20 @@ Trusted code assigns one of these policy tiers:
 - `established`: a longer sustained pattern is required before off-topic warnings; and
 - `deputy`: current River deputies are not automatically warned or banned for off-topic discussion. This leniency does not extend to rudeness or personal attacks. Unmistakable severe harm can trigger the higher-threshold deputy emergency path; other concerns are routed to the owner for review.
 
-Deputy status is refreshed from authenticated room state and is not granted by the model or by a locally stored nickname. Tenure never exempts severe harm. An automatic deputy ban requires an agreeing independent verifier, the higher configured deputy threshold, an eligible severe category, and all ordinary descendant-collateral checks. Trusted code selects the Room Owner signer for this exceptional path because a fellow deputy may not have authority to ban the target; the model cannot select the signer.
+Deputy status is refreshed from authenticated room state and is not granted by
+the model or by a locally stored nickname. Tenure never exempts severe harm,
+but the current guarded automatic-ban operation refuses deputies. A severe
+deputy incident is recorded for operator action.
 
 ## Enforcement architecture
 
-The shadow classifier holds no River signing key and cannot submit River writes.
-The separate enforcer described below is a required future enforcement boundary;
-it is not present in the shadow release.
+Shadow mode does not perform River writes. In warning and enforcement modes the
+daemon can use systemd credentials to invoke a fixed, root-owned River CLI. The
+classifier and action executor currently share one unprivileged service
+process; separating them across a permission-restricted local interface remains
+desirable defense in depth.
 
-When enforcement is implemented, the classifier will send a closed internal
-action request to a local enforcer over a permission-restricted Unix socket.
-
-The enforcer:
+The trusted action path:
 
 1. accepts only the closed actions `warn` and `ban`;
 2. derives the target from the stored, verified event rather than model output;
@@ -105,7 +107,10 @@ Before any ban submission, the service durably appends a structured pending-deci
 
 Raw audit context is stored in a mode-0600 local audit file with bounded size and retention. Ordinary service logs contain member IDs, content hashes, categories, and outcomes but no complete message bodies.
 
-Warnings may be signed by the Room Owner through the restricted enforcer. Bans should be signed by a dedicated owner-appointed Moderator identity. Revoking that deputy grant invalidates its bans, limiting recovery impact if its key is compromised.
+Warnings are posted by the configured moderator identity. Bans are signed by
+the configured Room Owner credential because a deputy cannot necessarily ban a
+target outside its invitation subtree. The owner credential materially raises
+the impact of a host or service compromise and must be separately protected.
 
 River bans remove the target and their transitive invite descendants. Automatic enforcement therefore defaults to `max_ban_descendants = 0`. A target with descendants goes to human review. Operators may explicitly raise this limit, but the model cannot override it.
 
@@ -156,12 +161,12 @@ Hard spending limits convert an unbounded financial attack into a bounded modera
 
 ## Key and host compromise resistance
 
-- Classifier and enforcer run as distinct unprivileged users.
-- Only the enforcer can read River keys; only the classifier can reach the model provider.
-- The enforcer's network access is restricted to the local Freenet gateway.
+- The service runs as a dedicated unprivileged user with systemd hardening and
+  local resource limits.
+- A future split executor should ensure only the executor can read River keys
+  and only the classifier can reach the model provider.
 - Credentials are supplied by systemd credentials or root-owned files, never environment values visible to unrelated processes or command-line arguments.
 - The Room Owner key is not copied into the repository, database, logs, crash reports, or model context.
-- The Unix socket validates peer credentials and is writable only by the classifier service group.
 - Executables and configuration are absolute paths owned by root. No shell is used for River operations.
 - The initial River reader invokes the absolute root-owned `riverctl` binary directly with an argument array and its JSONL subscription format. It never invokes a shell, inherits no credential-bearing environment, caps each line before parsing, and accepts only the closed event schema. The reader is localhost-only and the internet-facing classifier receives verified events over a Unix socket.
 - Logs escape control characters and do not store complete message bodies by default.
@@ -180,8 +185,9 @@ Hard spending limits convert an unbounded financial attack into a bounded modera
 ## Release gates
 
 Automatic warnings require gates 1–5 and 7–10 below. Automatic bans additionally
-require gate 6 and a separately isolated enforcer; bans remain disabled in the
-current implementation.
+require gate 6, independent model agreement, a fresh guarded River preflight,
+and persistent ban-rate limits. A separately isolated executor remains a
+recommended hardening step rather than a description of the current process.
 
 1. Persistent budget tests cover process restart, concurrent reservation, day/month boundaries, missing usage, provider timeout without retry, price overflow, and state corruption.
 2. Deduplication tests cover reconnects, edits, duplicate content, and pending-ban suppression.

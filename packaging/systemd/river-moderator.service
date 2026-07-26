@@ -9,6 +9,7 @@ User=river-moderator
 Group=river-moderator
 ExecStart=/usr/local/bin/river-moderator --config /etc/river-moderator/config.toml run
 LoadCredential=openai_api_key:/etc/river-moderator/credentials/openai_api_key
+LoadCredential=room_owner_signing_key:/etc/river-moderator/credentials/room_owner_signing_key
 StateDirectory=river-moderator
 RuntimeDirectory=river-moderator
 UMask=0077

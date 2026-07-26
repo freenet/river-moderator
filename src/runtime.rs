@@ -6,7 +6,10 @@ use redb::Database;
 use tokio::sync::{mpsc, Semaphore};
 
 use crate::{
-    audit::{DecisionAuditLog, DecisionAuditRecord, DECISION_AUDIT_SCHEMA_VERSION},
+    audit::{
+        AuditLog, AuditOutcome, BanAuditRecord, DecisionAuditLog, DecisionAuditRecord,
+        MembershipEvidence, ModelEvidence, AUDIT_SCHEMA_VERSION, DECISION_AUDIT_SCHEMA_VERSION,
+    },
     budget::BudgetLedger,
     classifier::{build_payload, PayloadInput, POLICY_VERSION},
     config::{Config, Mode, ModelProvider, ModelRole},
@@ -15,11 +18,11 @@ use crate::{
     model::{ModelPass, ModelResult},
     openai_model::OpenAiModelClient,
     policy::{decide, PolicyInput},
-    river_action::send_fixed_reply,
+    river_action::{ban_member_safely, send_fixed_reply},
     river_stream::{spawn_reader, RoomEvent},
     state::{
-        EventDisposition, LowSeverityAction, LowSeverityOutcome, ModerationState,
-        PendingLowSeverity, WarningRecord,
+        BanClaim, EventDisposition, LowSeverityAction, LowSeverityOutcome, ModerationState,
+        PendingBan, PendingLowSeverity, WarningRecord,
     },
     verdict::{Category, Verdict},
     warnings::{fixed_nudge, fixed_warning},
@@ -28,11 +31,13 @@ use crate::{
 const MODEL_REQUEST_OVERHEAD_BYTES: u64 = 6_000;
 const HISTORY_MESSAGES: usize = 200;
 
+#[derive(Clone)]
+struct RuntimeAudits {
+    decisions: Arc<DecisionAuditLog>,
+    bans: Arc<AuditLog>,
+}
+
 pub async fn run_moderator(config: Config) -> Result<()> {
-    anyhow::ensure!(
-        config.service.mode != Mode::Enforce,
-        "automatic bans are not implemented"
-    );
     anyhow::ensure!(
         config.model.provider == ModelProvider::OpenAi,
         "live runtime currently requires the OpenAI provider"
@@ -45,10 +50,13 @@ pub async fn run_moderator(config: Config) -> Result<()> {
         members.is_bootstrapped(&config.room.owner_verifying_key)?,
         "member tenure registry is not bootstrapped"
     );
-    let audit = Arc::new(DecisionAuditLog::open(&config.audit.decision_path)?);
+    let audits = RuntimeAudits {
+        decisions: Arc::new(DecisionAuditLog::open(&config.audit.decision_path)?),
+        bans: Arc::new(AuditLog::open(&config.audit.path)?),
+    };
     let model = Arc::new(OpenAiModelClient::new(&config.model)?);
     let config = Arc::new(config);
-    if config.service.mode == Mode::Warn {
+    if matches!(config.service.mode, Mode::Warn | Mode::Enforce) {
         let action_config = config.clone();
         let action_state = state.clone();
         tokio::spawn(async move { warning_loop(action_config, action_state).await });
@@ -104,7 +112,7 @@ pub async fn run_moderator(config: Config) -> Result<()> {
                 let task_state = state.clone();
                 let task_members = members.clone();
                 let task_budgets = budgets.clone();
-                let task_audit = audit.clone();
+                let task_audits = audits.clone();
                 let task_model = model.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
@@ -113,7 +121,7 @@ pub async fn run_moderator(config: Config) -> Result<()> {
                         task_state,
                         task_members,
                         task_budgets,
-                        task_audit,
+                        task_audits,
                         task_model,
                         message,
                     )
@@ -179,7 +187,7 @@ async fn process_message(
     state: Arc<ModerationState>,
     members: Arc<MemberRegistry>,
     budgets: Arc<BudgetLedger>,
-    audit: Arc<DecisionAuditLog>,
+    audits: RuntimeAudits,
     model: Arc<OpenAiModelClient>,
     message: VerifiedMessage,
 ) -> Result<()> {
@@ -317,8 +325,9 @@ async fn process_message(
             trust_tier,
             prior_category_observations: prior_observations,
             has_active_warning: active_warning.is_some(),
-            // Ban execution remains disabled. A future enforcer must replace
-            // this projection with a fresh River membership preflight.
+            // Policy projects against the conservative zero-descendant case.
+            // Execution still performs a fresh River membership preflight and
+            // refuses any target that actually has descendants.
             descendant_count: 0,
         },
         &config.policy,
@@ -363,7 +372,7 @@ async fn process_message(
         projected_action,
         classified_content_hash: message.content_hash(),
     };
-    audit.append(
+    audits.decisions.append(
         &record,
         config.audit.max_context_messages,
         config.audit.max_message_bytes,
@@ -385,7 +394,11 @@ async fn process_message(
         requests_today = budget_status.requests_today,
         "moderation decision"
     );
-    if config.service.mode == Mode::Warn {
+    if config.service.mode == Mode::Warn
+        || (config.service.mode == Mode::Enforce
+            && classifier.classification.verdict == Verdict::BanSevereHarm
+            && projected_action == crate::policy::PolicyAction::WarnAsModerator)
+    {
         schedule_warning_if_eligible(
             &config,
             &state,
@@ -395,7 +408,204 @@ async fn process_message(
             projected_action,
         )?;
     }
+    if config.service.mode == Mode::Enforce
+        && classifier.classification.verdict == Verdict::BanSevereHarm
+        && verifier.is_some()
+        && projected_action == crate::policy::PolicyAction::BanAsModerator
+    {
+        enforce_severe_ban(&config, &state, &audits.bans, &record).await?;
+    }
     Ok(())
+}
+
+async fn enforce_severe_ban(
+    config: &Config,
+    state: &ModerationState,
+    audit: &AuditLog,
+    decision: &DecisionAuditRecord,
+) -> Result<()> {
+    let member_id = &decision.trigger.author_id;
+    if config
+        .room
+        .protected_member_ids
+        .iter()
+        .any(|protected| protected == member_id)
+    {
+        tracing::error!(
+            decision_id = %decision.decision_id,
+            member_id,
+            "automatic ban refused for protected identity"
+        );
+        return Ok(());
+    }
+
+    if !state.message_is_current(
+        &decision.room_owner,
+        &decision.trigger.message_id,
+        member_id,
+        &decision.classified_content_hash,
+    )? {
+        let record = ban_record(decision, AuditOutcome::RefusedChangedOrDeletedMessage, None);
+        audit.append_ban(
+            &record,
+            config.audit.max_context_messages,
+            config.audit.max_message_bytes,
+        )?;
+        tracing::warn!(
+            decision_id = %decision.decision_id,
+            member_id,
+            "automatic ban refused because trigger changed or was deleted"
+        );
+        return Ok(());
+    }
+
+    let pending = PendingBan {
+        room_owner: decision.room_owner.clone(),
+        member_id: member_id.clone(),
+        decision_id: decision.decision_id.clone(),
+        created_at: Utc::now(),
+    };
+    match state.claim_ban(
+        &pending,
+        Utc::now(),
+        Duration::seconds(config.policy.ban_global_interval_seconds as i64),
+        config.policy.bans_per_hour,
+        config.policy.bans_per_day,
+    )? {
+        BanClaim::AlreadyPending => {
+            tracing::warn!(
+                decision_id = %decision.decision_id,
+                member_id,
+                "automatic ban suppressed because this member was already claimed"
+            );
+            return Ok(());
+        }
+        BanClaim::RateLimited => {
+            let record = ban_record(decision, AuditOutcome::RateLimited, None);
+            audit.append_ban(
+                &record,
+                config.audit.max_context_messages,
+                config.audit.max_message_bytes,
+            )?;
+            tracing::error!(
+                decision_id = %decision.decision_id,
+                member_id,
+                "automatic ban rate limited; human action required"
+            );
+            return Ok(());
+        }
+        BanClaim::Claimed => {}
+    }
+
+    // Sync the complete reason, trigger, context, member ID and model evidence
+    // before the first external write. A crash or ambiguous timeout is never
+    // retried automatically because the persistent claim already exists.
+    let pending_record = ban_record(decision, AuditOutcome::Pending, None);
+    audit.append_ban(
+        &pending_record,
+        config.audit.max_context_messages,
+        config.audit.max_message_bytes,
+    )?;
+
+    match ban_member_safely(&config.river, &decision.room_owner, member_id).await {
+        Ok(result) => {
+            let record = ban_record(decision, AuditOutcome::Executed, Some(result));
+            audit.append_ban(
+                &record,
+                config.audit.max_context_messages,
+                config.audit.max_message_bytes,
+            )?;
+            tracing::error!(
+                decision_id = %decision.decision_id,
+                member_id,
+                category = ?decision.classifier.category,
+                "automatic severe-harm ban executed"
+            );
+        }
+        Err(error) => {
+            let error_text = format!("{error:#}");
+            let record = ban_record(decision, AuditOutcome::Failed, Some(error_text.clone()));
+            audit.append_ban(
+                &record,
+                config.audit.max_context_messages,
+                config.audit.max_message_bytes,
+            )?;
+            tracing::error!(
+                decision_id = %decision.decision_id,
+                member_id,
+                error = %error_text,
+                "automatic ban failed or was refused and will not be retried"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn ban_record(
+    decision: &DecisionAuditRecord,
+    outcome: AuditOutcome,
+    river_result: Option<String>,
+) -> BanAuditRecord {
+    let verifier_cost = decision.verifier_cost_microusd.unwrap_or(0);
+    BanAuditRecord {
+        schema_version: AUDIT_SCHEMA_VERSION,
+        decision_id: decision.decision_id.clone(),
+        recorded_at: Utc::now(),
+        room_owner: decision.room_owner.clone(),
+        outcome,
+        normalized_reason: format!(
+            "{:?}: {}",
+            decision.classifier.category, decision.classifier.reason
+        ),
+        trigger: decision.trigger.clone(),
+        context: decision.context.clone(),
+        temporal_signals: decision.temporal_signals.clone(),
+        warning_history: Vec::new(),
+        model: ModelEvidence {
+            model: format!(
+                "{} + {}",
+                decision.classifier_model,
+                decision
+                    .verifier_model
+                    .as_deref()
+                    .unwrap_or("missing-verifier")
+            ),
+            prompt_version: POLICY_VERSION.into(),
+            classifier_request_id: request_id("classifier", &decision.trigger),
+            classifier: decision.classifier.clone(),
+            verifier_request_id: decision
+                .verifier
+                .as_ref()
+                .map(|_| request_id("verifier", &decision.trigger)),
+            verifier: decision.verifier.clone(),
+            reserved_microusd: decision
+                .classifier_cost_microusd
+                .saturating_add(verifier_cost),
+            actual_microusd: Some(
+                decision
+                    .classifier_cost_microusd
+                    .saturating_add(verifier_cost),
+            ),
+        },
+        membership: MembershipEvidence {
+            target_member_id: decision.trigger.author_id.clone(),
+            target_verifying_key: None,
+            target_nickname: decision.trigger.nickname.clone(),
+            trust_tier: decision.trust_tier,
+            first_observed_at: decision.tenure.first_observed_at,
+            observation_count: decision.tenure.observation_count,
+            active_days: decision.tenure.active_days,
+            bootstrapped_as_existing: decision.tenure.bootstrapped_as_existing,
+            invited_by_member_id: None,
+            ancestor_member_ids: Vec::new(),
+            // `riverctl --require-no-descendants` independently verifies this
+            // from fresh state before signing. Its success/refusal is retained
+            // verbatim in river_result.
+            descendant_member_ids: Vec::new(),
+        },
+        classified_content_hash: decision.classified_content_hash.clone(),
+        river_result,
+    }
 }
 
 fn schedule_warning_if_eligible(
@@ -406,11 +616,10 @@ fn schedule_warning_if_eligible(
     category: Category,
     action: crate::policy::PolicyAction,
 ) -> Result<()> {
-    let Some(activation_at) = config.service.activation_at else {
-        anyhow::bail!("warn mode has no activation cutoff");
-    };
-    if message.first_observed_at < activation_at {
-        return Ok(());
+    if let Some(activation_at) = config.service.activation_at {
+        if message.first_observed_at < activation_at {
+            return Ok(());
+        }
     }
     let action = match action {
         crate::policy::PolicyAction::NudgeAsModerator => LowSeverityAction::Nudge,
@@ -418,6 +627,7 @@ fn schedule_warning_if_eligible(
         _ => return Ok(()),
     };
     let pending = PendingLowSeverity {
+        policy_version: POLICY_VERSION.to_owned(),
         decision_id: decision_id.to_owned(),
         room_owner: message.room_owner.clone(),
         target_message_id: message.message_id.clone(),
@@ -426,8 +636,12 @@ fn schedule_warning_if_eligible(
         action,
         category,
         created_at: message.first_observed_at,
-        execute_after: message.first_observed_at
-            + Duration::seconds(config.policy.low_severity_grace_seconds as i64),
+        execute_after: if config.service.mode == Mode::Enforce {
+            message.first_observed_at
+        } else {
+            message.first_observed_at
+                + Duration::seconds(config.policy.low_severity_grace_seconds as i64)
+        },
         cancelled_by_member_id: None,
         completed_at: None,
         outcome: None,
@@ -450,6 +664,7 @@ async fn warning_loop(config: Arc<Config>, state: Arc<ModerationState>) {
         let now = Utc::now();
         let claimed = state.claim_due_low_severity(
             now,
+            POLICY_VERSION,
             Duration::seconds(config.policy.global_action_interval_seconds as i64),
             Duration::hours(config.policy.member_action_cooldown_hours as i64),
             Duration::seconds(config.policy.max_pending_action_age_seconds as i64),

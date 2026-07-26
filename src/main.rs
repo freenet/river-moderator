@@ -31,7 +31,7 @@ enum Command {
     CheckConfig,
     /// Print current persistent budget counters.
     BudgetStatus,
-    /// Run the classifier and, in warn mode, fixed rate-limited public replies.
+    /// Run real-time classification and the actions enabled by the configured mode.
     Run,
     /// Explicitly mark a newline-delimited current roster as pre-existing.
     BootstrapMembers { member_ids_file: PathBuf },
@@ -67,10 +67,6 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Run => {
             config.validate()?;
-            anyhow::ensure!(
-                !config.service.mode.is_enforce(),
-                "automatic bans remain release-gated"
-            );
             run_moderator(config).await?;
         }
         Command::BootstrapMembers { member_ids_file } => {

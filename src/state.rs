@@ -12,6 +12,7 @@ const HISTORY: TableDefinition<&str, &[u8]> = TableDefinition::new("room_history
 const WARNINGS: TableDefinition<&str, &[u8]> = TableDefinition::new("moderation_warnings_v1");
 const OBSERVATIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("policy_observations_v1");
 const PENDING_BANS: TableDefinition<&str, &[u8]> = TableDefinition::new("pending_bans_v1");
+const BAN_ACTIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("ban_actions_v1");
 const PENDING_LOW_SEVERITY: TableDefinition<&str, &[u8]> =
     TableDefinition::new("pending_low_severity_v1");
 const ACTION_LIMITS: TableDefinition<&str, &[u8]> = TableDefinition::new("action_limits_v1");
@@ -54,6 +55,13 @@ pub struct PendingBan {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BanClaim {
+    Claimed,
+    AlreadyPending,
+    RateLimited,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum LowSeverityAction {
@@ -69,10 +77,15 @@ pub enum LowSeverityOutcome {
     Failed,
     SuppressedStale,
     SuppressedChangedOrDeleted,
+    SuppressedPolicyChanged,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct PendingLowSeverity {
+    /// A queued warning must never survive a policy/prompt deployment. Empty
+    /// deserializes old records safely and is deliberately treated as stale.
+    #[serde(default)]
+    pub policy_version: String,
     pub decision_id: String,
     pub room_owner: String,
     pub target_message_id: String,
@@ -108,6 +121,7 @@ impl ModerationState {
         write.open_table(WARNINGS)?;
         write.open_table(OBSERVATIONS)?;
         write.open_table(PENDING_BANS)?;
+        write.open_table(BAN_ACTIONS)?;
         write.open_table(PENDING_LOW_SEVERITY)?;
         write.open_table(ACTION_LIMITS)?;
         write.commit()?;
@@ -368,6 +382,64 @@ impl ModerationState {
             .transpose()
     }
 
+    /// Persist the no-retry marker and consume the rate-limit slot in one
+    /// transaction before any external River I/O.
+    pub fn claim_ban(
+        &self,
+        pending: &PendingBan,
+        now: DateTime<Utc>,
+        global_interval: Duration,
+        per_hour: u64,
+        per_day: u64,
+    ) -> Result<BanClaim> {
+        let member_key = member_key(&pending.room_owner, &pending.member_id);
+        let write = self.database.begin_write()?;
+        let mut pending_table = write.open_table(PENDING_BANS)?;
+        if pending_table.get(member_key.as_str())?.is_some() {
+            return Ok(BanClaim::AlreadyPending);
+        }
+
+        let mut actions = write.open_table(BAN_ACTIONS)?;
+        let mut hour_count = 0u64;
+        let mut day_count = 0u64;
+        let mut latest = None;
+        let room_prefix = format!("{}:", pending.room_owner);
+        for entry in actions.iter()? {
+            let (key, value) = entry?;
+            if !key.value().starts_with(&room_prefix) {
+                continue;
+            }
+            let action: ActionLimitRecord = serde_json::from_slice(value.value())?;
+            if action.last_action_at > now - Duration::hours(1) {
+                hour_count = hour_count.saturating_add(1);
+            }
+            if action.last_action_at > now - Duration::days(1) {
+                day_count = day_count.saturating_add(1);
+            }
+            latest = Some(latest.map_or(action.last_action_at, |seen: DateTime<Utc>| {
+                seen.max(action.last_action_at)
+            }));
+        }
+        if latest.is_some_and(|last| last > now - global_interval)
+            || hour_count >= per_hour
+            || day_count >= per_day
+        {
+            return Ok(BanClaim::RateLimited);
+        }
+
+        let pending_encoded = serde_json::to_vec(pending)?;
+        pending_table.insert(member_key.as_str(), pending_encoded.as_slice())?;
+        let action_key = format!("{}:{}", pending.room_owner, pending.decision_id);
+        let action_encoded = serde_json::to_vec(&ActionLimitRecord {
+            last_action_at: now,
+        })?;
+        actions.insert(action_key.as_str(), action_encoded.as_slice())?;
+        drop(actions);
+        drop(pending_table);
+        write.commit()?;
+        Ok(BanClaim::Claimed)
+    }
+
     pub fn schedule_low_severity(&self, pending: &PendingLowSeverity) -> Result<bool> {
         let key = event_key(&pending.room_owner, &pending.target_message_id);
         let encoded = serde_json::to_vec(pending)?;
@@ -449,6 +521,7 @@ impl ModerationState {
     pub fn claim_due_low_severity(
         &self,
         now: DateTime<Utc>,
+        current_policy_version: &str,
         global_interval: Duration,
         member_interval: Duration,
         max_age: Duration,
@@ -469,6 +542,13 @@ impl ModerationState {
         due.sort_by_key(|(_, pending)| pending.execute_after);
 
         for (key, mut pending) in due {
+            if pending.policy_version != current_policy_version {
+                pending.completed_at = Some(now);
+                pending.outcome = Some(LowSeverityOutcome::SuppressedPolicyChanged);
+                let encoded = serde_json::to_vec(&pending)?;
+                pending_table.insert(key.as_str(), encoded.as_slice())?;
+                continue;
+            }
             if pending.created_at < now - max_age {
                 pending.completed_at = Some(now);
                 pending.outcome = Some(LowSeverityOutcome::SuppressedStale);
@@ -586,9 +666,18 @@ pub fn warning_group(category: Category) -> &'static str {
         Category::OffTopic => "topic",
         Category::Conduct | Category::Incivility | Category::PersonalAttack => "civility",
         Category::Flooding => "flooding",
-        Category::SelfPromotion => "promotion",
+        Category::Spam | Category::Scam | Category::Phishing | Category::SelfPromotion => {
+            "spam_scam"
+        }
         Category::Misinformation => "misinformation",
-        _ => "severe_or_other",
+        Category::Hate | Category::Harassment => "hate_harassment",
+        Category::Malware => "malware",
+        Category::Privacy => "privacy",
+        Category::Threat => "threat",
+        Category::Impersonation | Category::AccountCompromise => "identity_abuse",
+        Category::PromptInjection => "prompt_injection",
+        Category::SexualExploitation => "sexual_exploitation",
+        Category::None | Category::Other => "other",
     }
 }
 
@@ -744,11 +833,75 @@ mod tests {
     }
 
     #[test]
+    fn ban_claim_is_persistent_rate_limited_and_never_retried() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.redb");
+        let state = ModerationState::open(&path).unwrap();
+        let pending = |member: &str, decision: &str, created_at| PendingBan {
+            room_owner: "room".into(),
+            member_id: member.into(),
+            decision_id: decision.into(),
+            created_at,
+        };
+        assert_eq!(
+            state
+                .claim_ban(
+                    &pending("member-a", "decision-a", at(1)),
+                    at(1),
+                    Duration::seconds(60),
+                    5,
+                    20,
+                )
+                .unwrap(),
+            BanClaim::Claimed
+        );
+        assert_eq!(
+            state
+                .claim_ban(
+                    &pending("member-a", "decision-retry", at(2)),
+                    at(2),
+                    Duration::seconds(60),
+                    5,
+                    20,
+                )
+                .unwrap(),
+            BanClaim::AlreadyPending
+        );
+        assert_eq!(
+            state
+                .claim_ban(
+                    &pending("member-b", "decision-b", at(2)),
+                    at(2),
+                    Duration::seconds(60),
+                    5,
+                    20,
+                )
+                .unwrap(),
+            BanClaim::RateLimited
+        );
+        drop(state);
+        let state = ModerationState::open(&path).unwrap();
+        assert_eq!(
+            state
+                .claim_ban(
+                    &pending("member-a", "decision-after-restart", at(2)),
+                    at(2),
+                    Duration::seconds(60),
+                    5,
+                    20,
+                )
+                .unwrap(),
+            BanClaim::AlreadyPending
+        );
+    }
+
+    #[test]
     fn authenticated_moderator_reply_cancels_delayed_nudge() {
         let dir = tempdir().unwrap();
         let state = ModerationState::open(&dir.path().join("state.redb")).unwrap();
         assert!(state
             .schedule_low_severity(&PendingLowSeverity {
+                policy_version: "policy-v1".into(),
                 decision_id: "d".into(),
                 room_owner: "room".into(),
                 target_message_id: "target-message".into(),
@@ -793,6 +946,7 @@ mod tests {
         for (id, member) in [("one", "member-a"), ("two", "member-b")] {
             assert!(state
                 .schedule_low_severity(&PendingLowSeverity {
+                    policy_version: "policy-v1".into(),
                     decision_id: id.into(),
                     room_owner: "room".into(),
                     target_message_id: id.into(),
@@ -811,6 +965,7 @@ mod tests {
         let first = state
             .claim_due_low_severity(
                 at(3),
+                "policy-v1",
                 Duration::seconds(300),
                 Duration::hours(24),
                 Duration::seconds(600),
@@ -823,6 +978,7 @@ mod tests {
         assert!(state
             .claim_due_low_severity(
                 at(4),
+                "policy-v1",
                 Duration::seconds(300),
                 Duration::hours(24),
                 Duration::seconds(600),
@@ -835,11 +991,47 @@ mod tests {
         assert!(state
             .claim_due_low_severity(
                 at(4),
+                "policy-v1",
                 Duration::seconds(300),
                 Duration::hours(24),
                 Duration::seconds(600),
             )
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn queued_action_from_an_old_policy_is_suppressed() {
+        let dir = tempdir().unwrap();
+        let state = ModerationState::open(&dir.path().join("state.redb")).unwrap();
+        assert!(state
+            .schedule_low_severity(&PendingLowSeverity {
+                policy_version: "old-policy".into(),
+                decision_id: "old-decision".into(),
+                room_owner: "room".into(),
+                target_message_id: "old-message".into(),
+                target_member_id: "member".into(),
+                classified_content_hash: "hash".into(),
+                action: LowSeverityAction::Nudge,
+                category: Category::Incivility,
+                created_at: at(1),
+                execute_after: at(2),
+                cancelled_by_member_id: None,
+                completed_at: None,
+                outcome: None,
+            })
+            .unwrap());
+
+        assert!(state
+            .claim_due_low_severity(
+                at(3),
+                "new-policy",
+                Duration::seconds(300),
+                Duration::hours(24),
+                Duration::seconds(600),
+            )
+            .unwrap()
+            .is_none());
+        assert!(state.due_low_severity(at(4)).unwrap().is_empty());
     }
 }

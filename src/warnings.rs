@@ -1,7 +1,7 @@
 use crate::verdict::Category;
 
-pub const CONDUCT_NUDGE: &str = "Please keep criticism constructive and specific—describe what should improve without dismissive labels or personal remarks.";
-pub const TOPIC_NUDGE: &str = "Please move unrelated polarizing discussion elsewhere. Broadly technical discussion and brief casual conversation are welcome here.";
+pub const CONDUCT_NUDGE: &str = "Easy. Attack the idea, not the person.";
+pub const TOPIC_NUDGE: &str = "Take the politics elsewhere. Back to Freenet.";
 
 pub fn fixed_nudge(category: Category) -> &'static str {
     if category == Category::OffTopic {
@@ -13,24 +13,19 @@ pub fn fixed_nudge(category: Category) -> &'static str {
 
 pub fn fixed_warning(category: Category) -> &'static str {
     match category {
-        Category::OffTopic => {
-            "Moderation warning: Please move unrelated polarizing or persistently derailing discussion elsewhere. Broadly technical discussion is welcome. Continued derailment will result in a ban."
-        }
+        Category::OffTopic => "Take the politics elsewhere. Keep at it and you're gone.",
         Category::Incivility | Category::PersonalAttack | Category::Conduct => {
-            "Moderation warning: Disagreement is welcome, but rudeness and personal attacks are not. Critique ideas, not people. Continued conduct will result in a ban."
+            "Easy. Attack the idea, not the person. Next one and you're out."
         }
-        Category::Flooding => {
-            "Moderation warning: Please slow down and avoid flooding the room. Continued flooding will result in a ban."
-        }
-        Category::SelfPromotion => {
-            "Moderation warning: Please stop repetitive or unrelated promotion. Continued promotion will result in a ban."
-        }
+        Category::Flooding => "Cut the flood. Do it again and you're gone.",
+        Category::SelfPromotion => "Cut the promotion. Do it again and you're gone.",
         Category::Misinformation => {
-            "Moderation warning: Please stop repeatedly presenting harmful or demonstrably false claims as fact. Continued conduct will result in a ban."
+            "Back that up or drop it. Keep spreading harmful nonsense and you're gone."
         }
-        _ => {
-            "Moderation warning: This behavior is disruptive to the room. Continued conduct will result in a ban."
+        Category::Hate | Category::Harassment => {
+            "Knock it off. No slurs or hateful abuse. Next one and you're out."
         }
+        _ => "Knock it off. Do it again and you're out.",
     }
 }
 
@@ -42,12 +37,9 @@ mod tests {
     fn warning_text_is_fixed_and_does_not_accept_model_content() {
         assert_eq!(
             fixed_warning(Category::PersonalAttack),
-            "Moderation warning: Disagreement is welcome, but rudeness and personal attacks are not. Critique ideas, not people. Continued conduct will result in a ban."
+            "Easy. Attack the idea, not the person. Next one and you're out."
         );
-        assert_eq!(
-            CONDUCT_NUDGE,
-            "Please keep criticism constructive and specific—describe what should improve without dismissive labels or personal remarks."
-        );
+        assert_eq!(CONDUCT_NUDGE, "Easy. Attack the idea, not the person.");
         assert_eq!(fixed_nudge(Category::OffTopic), TOPIC_NUDGE);
         assert_eq!(fixed_nudge(Category::Incivility), CONDUCT_NUDGE);
     }
