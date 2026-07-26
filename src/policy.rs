@@ -11,6 +11,7 @@ use crate::{
 pub enum PolicyAction {
     None,
     RecordDisruption,
+    NudgeAsOwner,
     WarnAsOwner,
     BanAsModerator,
     BanAsOwnerPolicyEscalation,
@@ -36,8 +37,26 @@ pub fn decide(input: &PolicyInput<'_>, policy: &PolicyConfig) -> PolicyAction {
     match input.classification.verdict {
         Verdict::Allow => PolicyAction::None,
         Verdict::NeedsHumanReview => PolicyAction::HumanReview,
+        Verdict::NudgeConduct => decide_nudge(input, policy),
         Verdict::WarnDisruptive => decide_disruption(input, policy),
         Verdict::BanSevereHarm => decide_severe(input, policy),
+    }
+}
+
+fn decide_nudge(input: &PolicyInput<'_>, policy: &PolicyConfig) -> PolicyAction {
+    if input.classification.confidence_millionths < policy.nudge_confidence_millionths {
+        return PolicyAction::None;
+    }
+    if !matches!(
+        input.classification.category,
+        Category::Conduct | Category::Incivility | Category::PersonalAttack
+    ) {
+        return PolicyAction::HumanReview;
+    }
+    if input.prior_category_observations > 0 {
+        PolicyAction::WarnAsOwner
+    } else {
+        PolicyAction::NudgeAsOwner
     }
 }
 
@@ -134,6 +153,7 @@ mod tests {
             max_ban_descendants: 0,
             ban_confidence_millionths: 980_000,
             deputy_ban_confidence_millionths: 995_000,
+            nudge_confidence_millionths: 850_000,
             warning_confidence_millionths: 900_000,
             regular_after_days: 7,
             regular_after_messages: 10,
@@ -261,5 +281,21 @@ mod tests {
             descendant_count: 0,
         };
         assert_eq!(decide(&input, &policy()), PolicyAction::HumanReview);
+    }
+
+    #[test]
+    fn mild_rudeness_is_nudged_then_escalates_to_formal_warning() {
+        let c = classification(Verdict::NudgeConduct, Category::Incivility, 900_000);
+        let mut input = PolicyInput {
+            classification: &c,
+            verifier: None,
+            trust_tier: TrustTier::Regular,
+            prior_category_observations: 0,
+            has_active_warning: false,
+            descendant_count: 0,
+        };
+        assert_eq!(decide(&input, &policy()), PolicyAction::NudgeAsOwner);
+        input.prior_category_observations = 1;
+        assert_eq!(decide(&input, &policy()), PolicyAction::WarnAsOwner);
     }
 }

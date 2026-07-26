@@ -227,6 +227,7 @@ mod tests {
             max_ban_descendants: 0,
             ban_confidence_millionths: 980_000,
             deputy_ban_confidence_millionths: 995_000,
+            nudge_confidence_millionths: 850_000,
             warning_confidence_millionths: 900_000,
             regular_after_days: 7,
             regular_after_messages: 2,

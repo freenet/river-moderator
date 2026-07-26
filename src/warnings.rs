@@ -1,5 +1,8 @@
 use crate::verdict::Category;
 
+pub const CONDUCT_NUDGE: &str =
+    "Criticism is welcome, but please keep it constructive and specific. What about the interface do you think should be improved?";
+
 pub fn fixed_warning(category: Category) -> &'static str {
     match category {
         Category::OffTopic => {

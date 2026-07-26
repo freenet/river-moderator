@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
@@ -12,7 +12,7 @@ const RESERVATIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("budget_
 
 #[derive(Debug)]
 pub struct BudgetLedger {
-    database: Database,
+    database: Arc<Database>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -55,7 +55,10 @@ pub enum BudgetDenied {
 
 impl BudgetLedger {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
-        let database = Database::create(path)?;
+        Self::from_database(Arc::new(Database::create(path)?))
+    }
+
+    pub fn from_database(database: Arc<Database>) -> anyhow::Result<Self> {
         let write = database.begin_write()?;
         write.open_table(COUNTERS)?;
         write.open_table(RESERVATIONS)?;

@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use tokio::{
-    io::{AsyncBufReadExt, BufReader},
+    io::{AsyncBufRead, AsyncBufReadExt, BufReader},
     process::{Child, ChildStdout, Command},
 };
 
@@ -169,19 +169,31 @@ pub fn spawn_reader(config: &RiverConfig, room_owner: &str) -> Result<RiverReade
     })
 }
 
-pub async fn read_event(
-    reader: &mut BufReader<ChildStdout>,
+pub async fn read_event<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
     max_event_bytes: usize,
 ) -> Result<Option<RoomEvent>> {
     let mut line = Vec::with_capacity(4096);
-    let bytes = reader.read_until(b'\n', &mut line).await?;
-    if bytes == 0 {
-        return Ok(None);
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if line.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consume = newline.map_or(available.len(), |index| index + 1);
+        anyhow::ensure!(
+            line.len().saturating_add(consume) <= max_event_bytes,
+            "River event exceeds configured byte limit"
+        );
+        line.extend_from_slice(&available[..consume]);
+        reader.consume(consume);
+        if newline.is_some() {
+            break;
+        }
     }
-    anyhow::ensure!(
-        line.len() <= max_event_bytes,
-        "River event exceeds configured byte limit"
-    );
     if line.last() == Some(&b'\n') {
         line.pop();
         if line.last() == Some(&b'\r') {
@@ -242,5 +254,17 @@ mod tests {
             Utc::now()
         )
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_oversized_line_before_parsing() {
+        let (mut writer, reader) = tokio::io::duplex(256);
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            writer.write_all(&[b'x'; 65]).await.unwrap();
+            writer.write_all(b"\n").await.unwrap();
+        });
+        let mut reader = BufReader::new(reader);
+        assert!(read_event(&mut reader, 64).await.is_err());
     }
 }

@@ -64,6 +64,11 @@ impl Config {
             self.limits.requests_per_author_hour > 0,
             "per-author request limit must be positive"
         );
+        anyhow::ensure!(self.limits.concurrency > 0, "concurrency must be positive");
+        anyhow::ensure!(
+            self.limits.queue_depth >= self.limits.concurrency,
+            "queue depth must be at least concurrency"
+        );
         anyhow::ensure!(
             self.audit.retention_days > 0,
             "audit retention must be positive"
@@ -88,6 +93,13 @@ impl Config {
             self.river.max_event_bytes > 0 && self.river.max_event_bytes <= 1_048_576,
             "max_event_bytes is invalid"
         );
+        if !self.river.allow_remote_node {
+            anyhow::ensure!(
+                self.river.node_url.starts_with("ws://127.0.0.1:")
+                    || self.river.node_url.starts_with("ws://[::1]:"),
+                "River node must be loopback unless allow_remote_node is true"
+            );
+        }
         anyhow::ensure!(
             self.policy.max_ban_descendants == 0 || !self.service.mode.is_enforce(),
             "nonzero descendant collateral is forbidden in enforcement mode"
@@ -99,6 +111,15 @@ impl Config {
         anyhow::ensure!(
             self.policy.regular_after_messages <= self.policy.established_after_messages,
             "established message count must not be below regular message count"
+        );
+        anyhow::ensure!(
+            self.policy.nudge_confidence_millionths <= self.policy.warning_confidence_millionths
+                && self.policy.warning_confidence_millionths
+                    <= self.policy.ban_confidence_millionths
+                && self.policy.ban_confidence_millionths
+                    <= self.policy.deputy_ban_confidence_millionths
+                && self.policy.deputy_ban_confidence_millionths <= 1_000_000,
+            "confidence thresholds must be ordered and at most one million"
         );
         Ok(())
     }
@@ -143,6 +164,8 @@ pub struct RiverConfig {
     pub riverctl_path: PathBuf,
     pub config_dir: PathBuf,
     pub node_url: String,
+    #[serde(default)]
+    pub allow_remote_node: bool,
     pub max_event_bytes: usize,
 }
 
@@ -210,6 +233,7 @@ pub struct PolicyConfig {
     pub max_ban_descendants: usize,
     pub ban_confidence_millionths: u32,
     pub deputy_ban_confidence_millionths: u32,
+    pub nudge_confidence_millionths: u32,
     pub warning_confidence_millionths: u32,
     pub regular_after_days: u32,
     pub regular_after_messages: u64,

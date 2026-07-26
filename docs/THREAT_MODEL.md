@@ -27,14 +27,15 @@ The design assumes an attacker knows the complete source code, prompts, model na
 
 ## Policy taxonomy
 
-The classifier returns one of four closed verdicts:
+The classifier returns one of five closed verdicts:
 
 - `allow`
+- `nudge_conduct`
 - `warn_disruptive`
 - `ban_severe_harm`
 - `needs_human_review`
 
-It also selects a closed category, confidence, and a short audit reason. Intent is not an input to enforcement.
+It also selects a closed category, confidence, and a short audit reason. Intent is not an input to enforcement. `nudge_conduct` is a visible but non-punitive reminder for a mildly rude or dismissive formulation; it does not start the warning-to-ban clock. Repeated nudges in the same conduct group escalate to a formal warning.
 
 `warn_disruptive` covers sustained off-topic discussion, rudeness, incivility, ad hominem or other personal attacks below the severe-harm threshold, repetitive promotion, monopolizing the room, inflammatory derailment, excessive posting, and persistently harmful misinformation. Members may disagree strongly and criticize ideas, code, projects, and decisions, but must do so politely. Repetition after a category-specific warning may be escalated to a ban.
 

@@ -16,6 +16,7 @@ max_message_bytes = 4096
 riverctl_path = "/usr/local/bin/riverctl"
 config_dir = "/var/lib/river-moderator/river"
 node_url = "ws://127.0.0.1:7509/v1/contract/command?encodingProtocol=native"
+allow_remote_node = false
 max_event_bytes = 65536
 
 [room]
@@ -49,6 +50,7 @@ warning_window_hours = 24
 max_ban_descendants = 0
 ban_confidence_millionths = 980000
 deputy_ban_confidence_millionths = 995000
+nudge_confidence_millionths = 850000
 warning_confidence_millionths = 900000
 regular_after_days = 7
 regular_after_messages = 10
