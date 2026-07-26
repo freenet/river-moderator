@@ -3,3 +3,4 @@
 *.redb.*
 .env
 credentials/
+/.claude/
