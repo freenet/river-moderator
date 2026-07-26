@@ -86,4 +86,6 @@ context and timestamps to the classifier/verifier. Deterministic high-signal
 events such as extreme bursts, duplicate floods, oversized ASCII walls, and
 common unsolicited-contact lures also trigger review. Five reports from one
 member within sixty seconds are treated as report flooding and enter the same
-guarded ban path.
+guarded ban path. Only reports whose targets were adjudicated as non-spam count
+toward that threshold; reports of confirmed spam, scams, phishing, or flooding
+do not punish the reporter.

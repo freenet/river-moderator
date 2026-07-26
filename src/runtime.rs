@@ -199,57 +199,6 @@ async fn process_message(
         8,
     )?;
     let is_report = is_spam_report(&incoming_message);
-    if is_report {
-        let recent_reports = incoming_context
-            .iter()
-            .filter(|candidate| {
-                candidate.author_id == incoming_message.author_id
-                    && is_spam_report(candidate)
-                    && incoming_message
-                        .first_observed_at
-                        .signed_duration_since(candidate.first_observed_at)
-                        .num_seconds()
-                        .abs()
-                        <= 60
-            })
-            .count()
-            + 1;
-        if recent_reports >= 5 {
-            let tenure = members.observe(
-                &incoming_message.room_owner,
-                &incoming_message.author_id,
-                incoming_message.first_observed_at,
-            )?;
-            let is_protected = config
-                .room
-                .protected_member_ids
-                .iter()
-                .any(|member| member == &incoming_message.author_id);
-            let decision = report_abuse_decision(
-                &config,
-                &incoming_message,
-                incoming_context.clone(),
-                tenure,
-                is_protected,
-                recent_reports,
-            );
-            audits.decisions.append(
-                &decision,
-                config.audit.max_context_messages,
-                config.audit.max_message_bytes,
-            )?;
-            tracing::error!(
-                decision_id = %decision.decision_id,
-                member_id = %incoming_message.author_id,
-                recent_reports,
-                "report flooding classified as severe abuse"
-            );
-            if config.service.mode == Mode::Enforce {
-                enforce_severe_ban(&config, &state, &audits.bans, &decision).await?;
-            }
-            return Ok(());
-        }
-    }
     let report_target = if is_report {
         let target_id = incoming_message
             .reply_to_message_id
@@ -286,7 +235,7 @@ async fn process_message(
             8,
         )?
     } else {
-        incoming_context
+        incoming_context.clone()
     };
     let signals = temporal_signals(&message, &context);
     let tenure = members.observe(
@@ -510,6 +459,54 @@ async fn process_message(
         config.audit.max_context_messages,
         config.audit.max_message_bytes,
     )?;
+    if is_report {
+        let target_is_spam = matches!(
+            classifier.classification.category,
+            Category::Spam | Category::Scam | Category::Phishing | Category::Flooding
+        );
+        let negative_before = state.recent_negative_reports(
+            &incoming_message.room_owner,
+            &incoming_message.author_id,
+            incoming_message.first_observed_at - Duration::seconds(60),
+            incoming_message.first_observed_at,
+        )?;
+        state.record_report_outcome(&incoming_message, target_is_spam)?;
+        let negative_reports = negative_before + usize::from(!target_is_spam);
+        if negative_reports >= 5 {
+            let reporter_tenure = members.observe(
+                &incoming_message.room_owner,
+                &incoming_message.author_id,
+                incoming_message.first_observed_at,
+            )?;
+            let reporter_is_protected = config
+                .room
+                .protected_member_ids
+                .iter()
+                .any(|member| member == &incoming_message.author_id);
+            let decision = report_abuse_decision(
+                &config,
+                &incoming_message,
+                incoming_context.clone(),
+                reporter_tenure,
+                reporter_is_protected,
+                negative_reports,
+            );
+            audits.decisions.append(
+                &decision,
+                config.audit.max_context_messages,
+                config.audit.max_message_bytes,
+            )?;
+            tracing::error!(
+                decision_id = %decision.decision_id,
+                member_id = %incoming_message.author_id,
+                negative_reports,
+                "report flooding classified as severe abuse"
+            );
+            if config.service.mode == Mode::Enforce {
+                enforce_severe_ban(&config, &state, &audits.bans, &decision).await?;
+            }
+        }
+    }
     tracing::info!(
         decision_id = %decision_id,
         member_id = %message.author_id,
@@ -754,7 +751,7 @@ fn report_abuse_decision(
         verdict: Verdict::BanSevereHarm,
         category: Category::Spam,
         confidence_millionths: 1_000_000,
-        reason: format!("Report flooding: {recent_reports} reports in one minute."),
+        reason: format!("Report flooding: {recent_reports} negative reports in one minute."),
     };
     DecisionAuditRecord {
         schema_version: DECISION_AUDIT_SCHEMA_VERSION,

@@ -16,6 +16,7 @@ const BAN_ACTIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("ban_acti
 const PENDING_LOW_SEVERITY: TableDefinition<&str, &[u8]> =
     TableDefinition::new("pending_low_severity_v1");
 const ACTION_LIMITS: TableDefinition<&str, &[u8]> = TableDefinition::new("action_limits_v1");
+const REPORT_OUTCOMES: TableDefinition<&str, &[u8]> = TableDefinition::new("report_outcomes_v1");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EventDisposition {
@@ -105,6 +106,14 @@ struct ActionLimitRecord {
     last_action_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct ReportOutcome {
+    room_owner: String,
+    reporter_id: String,
+    observed_at: DateTime<Utc>,
+    target_is_spam: bool,
+}
+
 pub struct ModerationState {
     database: Arc<Database>,
 }
@@ -124,6 +133,7 @@ impl ModerationState {
         write.open_table(BAN_ACTIONS)?;
         write.open_table(PENDING_LOW_SEVERITY)?;
         write.open_table(ACTION_LIMITS)?;
+        write.open_table(REPORT_OUTCOMES)?;
         write.commit()?;
         Ok(Self { database })
     }
@@ -291,6 +301,52 @@ impl ModerationState {
         selected.sort_by_key(|message| message.first_observed_at);
         selected.dedup_by(|left, right| left.message_id == right.message_id);
         Ok(selected)
+    }
+
+    pub fn record_report_outcome(
+        &self,
+        report: &VerifiedMessage,
+        target_is_spam: bool,
+    ) -> Result<()> {
+        let key = event_key(&report.room_owner, &report.message_id);
+        let outcome = ReportOutcome {
+            room_owner: report.room_owner.clone(),
+            reporter_id: report.author_id.clone(),
+            observed_at: report.first_observed_at,
+            target_is_spam,
+        };
+        let encoded = serde_json::to_vec(&outcome)?;
+        let write = self.database.begin_write()?;
+        write
+            .open_table(REPORT_OUTCOMES)?
+            .insert(key.as_str(), encoded.as_slice())?;
+        write.commit()?;
+        Ok(())
+    }
+
+    pub fn recent_negative_reports(
+        &self,
+        room_owner: &str,
+        reporter_id: &str,
+        since: DateTime<Utc>,
+        until: DateTime<Utc>,
+    ) -> Result<usize> {
+        let read = self.database.begin_read()?;
+        let table = read.open_table(REPORT_OUTCOMES)?;
+        let mut count = 0;
+        for entry in table.iter()? {
+            let (_, value) = entry?;
+            let outcome: ReportOutcome = serde_json::from_slice(value.value())?;
+            if outcome.room_owner == room_owner
+                && outcome.reporter_id == reporter_id
+                && !outcome.target_is_spam
+                && outcome.observed_at >= since
+                && outcome.observed_at <= until
+            {
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 
     pub fn record_policy_observation(
