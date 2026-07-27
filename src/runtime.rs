@@ -19,7 +19,7 @@ use crate::{
     name_guard::{self, NameGuardAction},
     openai_model::OpenAiModelClient,
     policy::{decide, PolicyInput},
-    river_action::{ban_member_safely, send_fixed_reply},
+    river_action::{ban_member_safely, send_fixed_reply, verify_ban_guards},
     river_stream::{spawn_reader, RoomEvent},
     state::{
         BanClaim, EventDisposition, LowSeverityAction, LowSeverityOutcome, ModerationState,
@@ -55,6 +55,11 @@ pub async fn run_moderator(config: Config) -> Result<()> {
         decisions: Arc::new(DecisionAuditLog::open(&config.audit.decision_path)?),
         bans: Arc::new(AuditLog::open(&config.audit.path)?),
     };
+    // Refuse to start rather than discover at ban time that the configured
+    // riverctl cannot enforce the guards.
+    if matches!(config.service.mode, Mode::Enforce) {
+        verify_ban_guards(&config.river).await?;
+    }
     let model = Arc::new(OpenAiModelClient::new(&config.model)?);
     let config = Arc::new(config);
     if matches!(config.service.mode, Mode::Warn | Mode::Enforce) {
@@ -1220,6 +1225,35 @@ mod tests {
     fn jitter_handles_a_delay_too_small_to_spread() {
         assert_eq!(jittered_delay(0).as_millis(), 0);
         assert_eq!(jittered_delay(4).as_millis(), 4);
+    }
+
+    /// The preflight is only worth anything if it lists the flags the ban
+    /// actually passes. Scrape the call site so adding a guard flag without
+    /// adding it here fails CI instead of silently going unchecked.
+    #[test]
+    fn ban_guard_preflight_covers_every_flag_the_ban_passes() {
+        let source = include_str!("river_action.rs");
+        let ban_fn = source
+            .split("pub async fn ban_member_safely")
+            .nth(1)
+            .expect("ban_member_safely must exist");
+        let passed: Vec<String> = ban_fn
+            .split(".arg(\"")
+            .skip(1)
+            .filter_map(|chunk| chunk.split('"').next())
+            .filter(|flag| flag.starts_with("--require-"))
+            .map(str::to_string)
+            .collect();
+        assert!(
+            !passed.is_empty(),
+            "scrape found no guard flags; fixture broken"
+        );
+        for flag in &passed {
+            assert!(
+                crate::river_action::REQUIRED_BAN_GUARDS.contains(&flag.as_str()),
+                "{flag} is passed to riverctl but not checked by the startup preflight"
+            );
+        }
     }
 
     #[test]

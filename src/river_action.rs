@@ -91,6 +91,59 @@ pub async fn send_fixed_reply(
 /// Execute a leaf-only ban after verifying the installed riverctl derives the
 /// pinned production contract. Riverctl repeats all membership predicates on
 /// the fresh state it fetches immediately before signing the ban.
+/// Guard flags `ban_member_safely` depends on. Each one is a safety check the
+/// moderator delegates to riverctl rather than reimplementing.
+pub const REQUIRED_BAN_GUARDS: &[&str] = &[
+    "--require-exact-member-id",
+    "--require-no-descendants",
+    "--require-not-deputy",
+];
+
+/// Fail fast if the configured riverctl cannot enforce the ban guards.
+///
+/// These flags are not in River's `main` as of 2026-07-27; they come from
+/// commit 4ad849a2 on `agent/moderation-events`. So an ordinary
+/// `cargo install --path cli` from main produces a riverctl that silently lacks
+/// them, and installing that over the configured path leaves a moderator which
+/// starts cleanly, classifies correctly, and then fails on the first real ban
+/// with an unknown-argument error. Checking at startup converts that into a
+/// refusal to run, which is the failure we want.
+pub async fn verify_ban_guards(config: &RiverConfig) -> Result<()> {
+    validate_executable(config.riverctl_path.as_path())?;
+    let mut command = tokio::process::Command::new(&config.riverctl_path);
+    command
+        .arg("member")
+        .arg("ban")
+        .arg("--help")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(ACTION_TIMEOUT, command.output())
+        .await
+        .context("River ban-guard preflight timed out")??;
+    // `--help` writes to stdout, but tolerate either stream across clap versions.
+    let help = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let missing: Vec<&str> = REQUIRED_BAN_GUARDS
+        .iter()
+        .copied()
+        .filter(|flag| !help.contains(flag))
+        .collect();
+    anyhow::ensure!(
+        missing.is_empty(),
+        "riverctl at {} does not support the ban guard flag(s) {}. \
+         Bans would fail at the moment they are needed. These flags are not in \
+         River main; build riverctl from a source that includes them.",
+        config.riverctl_path.display(),
+        missing.join(", ")
+    );
+    Ok(())
+}
+
 pub async fn ban_member_safely(
     config: &RiverConfig,
     room_owner: &str,
