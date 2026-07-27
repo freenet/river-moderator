@@ -177,9 +177,17 @@ fn jittered_delay(delay_millis: u64) -> std::time::Duration {
 async fn reader_loop(config: Arc<Config>, sender: mpsc::Sender<RoomEvent>) {
     // The reader has been observed exiting ~55 times an hour with "Unexpected
     // response to SUBSCRIBE request", median session life 3s. A fixed 5s retry
-    // hammers a node that is already refusing, and every reconnect re-dumps
-    // room history because riverctl does not honour `--initial-messages 0`,
-    // which is what fed the replayed-backlog flooding false positive.
+    // hammers a node that is already refusing.
+    //
+    // Each reconnect also replays whatever the local room cache had not yet
+    // seen. That is correct catch-up, not a bug, and it is how messages posted
+    // during a blind window still get moderated: `--initial-messages 0`
+    // suppresses history, and `subscribe_and_stream` seeds its seen-set from
+    // local state first. But the whole catch-up batch shares one arrival
+    // instant, which is what corrupted the burst signals behind the flooding
+    // false positive; see `event::within_burst`. Fewer reconnects means fewer
+    // such batches, so this backoff reduces the exposure even though the real
+    // correction lives in the signal computation.
     let mut delay_millis = RECONNECT_BASE_DELAY_MILLIS;
     loop {
         match spawn_reader(&config.river, &config.room.owner_verifying_key) {
