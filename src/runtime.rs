@@ -146,11 +146,46 @@ pub async fn run_moderator(config: Config) -> Result<()> {
     anyhow::bail!("River event channel closed")
 }
 
+/// First reconnect delay. Short, because most reader exits are a single blip
+/// and waiting out a long backoff is dead time for moderation.
+const RECONNECT_BASE_DELAY_MILLIS: u64 = 1_000;
+
+/// Ceiling on the reconnect delay. Capped low enough that a sustained outage
+/// still leaves the room checked roughly twice a minute.
+const RECONNECT_MAX_DELAY_MILLIS: u64 = 30_000;
+
+/// A session lasting at least this long counts as healthy and resets the
+/// backoff, so one bad patch does not slow recovery for the rest of the day.
+const HEALTHY_SESSION_SECONDS: u64 = 30;
+
+/// Spread reconnects by ±20% so a node that is refusing subscriptions does not
+/// get retried on a metronome, and so restarts do not line up. Derived from the
+/// clock rather than adding an RNG dependency for a single jitter value.
+fn jittered_delay(delay_millis: u64) -> std::time::Duration {
+    let spread = delay_millis / 5;
+    if spread == 0 {
+        return std::time::Duration::from_millis(delay_millis);
+    }
+    let entropy = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| u64::from(since.subsec_nanos()))
+        .unwrap_or(0);
+    let offset = entropy % (2 * spread);
+    std::time::Duration::from_millis(delay_millis.saturating_sub(spread).saturating_add(offset))
+}
+
 async fn reader_loop(config: Arc<Config>, sender: mpsc::Sender<RoomEvent>) {
+    // The reader has been observed exiting ~55 times an hour with "Unexpected
+    // response to SUBSCRIBE request", median session life 3s. A fixed 5s retry
+    // hammers a node that is already refusing, and every reconnect re-dumps
+    // room history because riverctl does not honour `--initial-messages 0`,
+    // which is what fed the replayed-backlog flooding false positive.
+    let mut delay_millis = RECONNECT_BASE_DELAY_MILLIS;
     loop {
         match spawn_reader(&config.river, &config.room.owner_verifying_key) {
             Ok(mut reader) => {
                 tracing::info!(riverctl_pid = reader.process_id(), "River reader connected");
+                let connected_at = Instant::now();
                 loop {
                     match reader.next_event(config.river.max_event_bytes).await {
                         Ok(Some(event)) => match sender.try_send(event) {
@@ -173,13 +208,24 @@ async fn reader_loop(config: Arc<Config>, sender: mpsc::Sender<RoomEvent>) {
                         }
                     }
                 }
+                if connected_at.elapsed().as_secs() >= HEALTHY_SESSION_SECONDS {
+                    delay_millis = RECONNECT_BASE_DELAY_MILLIS;
+                }
             }
             Err(error) => tracing::error!(
                 error = %format!("{error:#}"),
                 "could not start River reader"
             ),
         }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        let wait = jittered_delay(delay_millis);
+        tracing::debug!(
+            delay_ms = wait.as_millis() as u64,
+            "waiting before River reader reconnect"
+        );
+        tokio::time::sleep(wait).await;
+        delay_millis = delay_millis
+            .saturating_mul(2)
+            .min(RECONNECT_MAX_DELAY_MILLIS);
     }
 }
 
@@ -1127,6 +1173,45 @@ mod tests {
                 "{content:?} should not route for review"
             );
         }
+    }
+
+    #[test]
+    fn reconnect_backoff_grows_and_is_capped() {
+        let mut delay = RECONNECT_BASE_DELAY_MILLIS;
+        let mut seen = vec![delay];
+        for _ in 0..12 {
+            delay = delay.saturating_mul(2).min(RECONNECT_MAX_DELAY_MILLIS);
+            seen.push(delay);
+        }
+        assert_eq!(seen[0], 1_000, "first retry stays fast for a single blip");
+        assert!(seen.windows(2).all(|w| w[1] >= w[0]), "must be monotonic");
+        assert_eq!(
+            *seen.last().unwrap(),
+            RECONNECT_MAX_DELAY_MILLIS,
+            "a sustained outage must still recheck about twice a minute"
+        );
+    }
+
+    /// Jitter must actually spread the delay, or a node refusing subscriptions
+    /// gets retried on a metronome by every restarted instance at once.
+    #[test]
+    fn reconnect_jitter_stays_within_twenty_percent() {
+        for base in [1_000u64, 4_000, RECONNECT_MAX_DELAY_MILLIS] {
+            for _ in 0..64 {
+                let actual = jittered_delay(base).as_millis() as u64;
+                let spread = base / 5;
+                assert!(
+                    actual >= base - spread && actual <= base + spread,
+                    "{actual} outside +/-20% of {base}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn jitter_handles_a_delay_too_small_to_spread() {
+        assert_eq!(jittered_delay(0).as_millis(), 0);
+        assert_eq!(jittered_delay(4).as_millis(), 4);
     }
 
     #[test]
