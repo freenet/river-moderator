@@ -26,7 +26,7 @@ use crate::{
         PendingBan, PendingLowSeverity, WarningRecord,
     },
     verdict::{Category, Verdict},
-    warnings::{fixed_nudge, fixed_warning},
+    warnings::{fixed_nudge, fixed_warning, NoticeSubject},
 };
 
 const MODEL_REQUEST_OVERHEAD_BYTES: u64 = 6_000;
@@ -595,6 +595,7 @@ async fn process_message(
             &decision_id,
             classifier.classification.category,
             projected_action,
+            join_name_candidate,
         )?;
     }
     if config.service.mode == Mode::Enforce
@@ -852,6 +853,7 @@ fn schedule_warning_if_eligible(
     decision_id: &str,
     category: Category,
     action: crate::policy::PolicyAction,
+    about_display_name: bool,
 ) -> Result<()> {
     if let Some(activation_at) = config.service.activation_at {
         if message.first_observed_at < activation_at {
@@ -872,6 +874,7 @@ fn schedule_warning_if_eligible(
         classified_content_hash: message.content_hash(),
         action,
         category,
+        about_display_name,
         created_at: message.first_observed_at,
         execute_after: if config.service.mode == Mode::Enforce {
             message.first_observed_at
@@ -950,9 +953,14 @@ async fn warning_loop(config: Arc<Config>, state: Arc<ModerationState>) {
                 continue;
             }
         }
+        let subject = if pending.about_display_name {
+            NoticeSubject::DisplayName
+        } else {
+            NoticeSubject::Message
+        };
         let text = match pending.action {
-            LowSeverityAction::Nudge => fixed_nudge(pending.category),
-            LowSeverityAction::FormalWarning => fixed_warning(pending.category),
+            LowSeverityAction::Nudge => fixed_nudge(pending.category, subject),
+            LowSeverityAction::FormalWarning => fixed_warning(pending.category, subject),
         };
         match send_fixed_reply(
             &config.river,

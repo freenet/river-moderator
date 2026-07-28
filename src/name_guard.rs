@@ -30,6 +30,19 @@ const EMBEDDED_STEMS: &str = concat!(
     r"jungle ?bunn(?:y|ie)|shitskin"
 );
 
+/// Strong profanity aimed outward in a display name.
+///
+/// Deliberately about FORM, not target. This matches "Fuck ICE", "Fuck Biden",
+/// "Fuck Trump" and "Fuck Hamas" identically, because a list of political
+/// targets would encode a political side into the code and rot immediately.
+/// Matching the profanity instead is symmetric by construction.
+///
+/// A match only routes the join for review, exactly like the slur tiers, and
+/// the room's existing off-topic policy decides from there. It is not a
+/// profanity ban: "Fuck Cancer" reaches the same model call and should come
+/// back allowed.
+const OUTWARD_PROFANITY: &str = r"f+u+c+k+|f+u+k+|f+c+k|ph+u+c+k";
+
 /// Common English inflections appended to a stem. Without this, every plural
 /// and participle escaped the guard: the trailing `[^a-z]` boundary rejected
 /// any letter suffix, so "trannies", "niggers", and even "faggots" all passed
@@ -74,6 +87,11 @@ static SEVERE_NAME_PATTERNS: LazyLock<RegexSet> = LazyLock::new(|| {
         // pattern is unanchored and the group is fully optional, so appending
         // it could not change whether this tier matches.
         format!(r"(?i)(?:{EMBEDDED_STEMS})"),
+        // Outward profanity with something after it, i.e. a slogan aimed at a
+        // target rather than a name that merely contains a rude word. Requires
+        // the target so "Fuckface" (an insult about the bearer) is left to the
+        // slur tiers and "Fluffy" is untouched.
+        format!(r"(?i)(^|[^a-z])(?:{OUTWARD_PROFANITY})\s*[a-z0-9]"),
     ])
     .expect("static name patterns are valid")
 });
@@ -425,6 +443,38 @@ mod tests {
     fn screens_words_containing_a_distinctive_stem() {
         assert!(is_candidate("snigger"));
         assert!(is_candidate("niggardly"));
+    }
+
+    /// Viewpoint neutrality is the whole design constraint here, so pin it:
+    /// the tier matches the profanity, never the target, so a name attacking
+    /// any political figure or institution routes identically. If this ever
+    /// fails, the guard has acquired a political side.
+    #[test]
+    fn outward_profanity_routes_identically_whatever_the_target() {
+        for nickname in [
+            "Fuck ICE",
+            "Fuck Biden",
+            "Fuck Trump",
+            "Fuck Hamas",
+            "Fuck Israel",
+            "Fuck Putin",
+            "Fuck the EU",
+            "FuckICE",
+            "fuck the police",
+        ] {
+            assert!(is_candidate(nickname), "{nickname} should be screened");
+        }
+    }
+
+    /// Ordinary names that merely contain the letters must stay clean, or every
+    /// Fuchs and Canuck buys a model call forever.
+    #[test]
+    fn outward_profanity_does_not_catch_ordinary_names() {
+        for nickname in [
+            "Fluffy", "Fuchsia", "Fucci", "Canuck", "Starbuck", "Kentucky", "Fuchs", "fun guy",
+        ] {
+            assert!(!is_candidate(nickname), "{nickname} should not be screened");
+        }
     }
 
     #[test]

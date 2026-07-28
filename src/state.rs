@@ -94,6 +94,11 @@ pub struct PendingLowSeverity {
     pub classified_content_hash: String,
     pub action: LowSeverityAction,
     pub category: Category,
+    /// Whether the notice is about the member's display name rather than a
+    /// message. Defaults false so pre-existing records deserialize; they are
+    /// dropped as stale by `policy_version` anyway.
+    #[serde(default)]
+    pub about_display_name: bool,
     pub created_at: DateTime<Utc>,
     pub execute_after: DateTime<Utc>,
     pub cancelled_by_member_id: Option<String>,
@@ -965,6 +970,7 @@ mod tests {
                 classified_content_hash: "hash".into(),
                 action: LowSeverityAction::Nudge,
                 category: Category::Incivility,
+                about_display_name: false,
                 created_at: at(1),
                 execute_after: at(1) + Duration::seconds(60),
                 cancelled_by_member_id: None,
@@ -1010,6 +1016,7 @@ mod tests {
                     classified_content_hash: "hash".into(),
                     action: LowSeverityAction::FormalWarning,
                     category: Category::OffTopic,
+                    about_display_name: false,
                     created_at: at(1),
                     execute_after: at(2),
                     cancelled_by_member_id: None,
@@ -1070,6 +1077,7 @@ mod tests {
                 classified_content_hash: "hash".into(),
                 action: LowSeverityAction::Nudge,
                 category: Category::Incivility,
+                about_display_name: false,
                 created_at: at(1),
                 execute_after: at(2),
                 cancelled_by_member_id: None,
