@@ -583,10 +583,17 @@ async fn process_message(
         requests_today = budget_status.requests_today,
         "moderation decision"
     );
+    // Enforce deliberately leaves ordinary tone and topic decisions in the audit
+    // log (README). A display name is the exception: it is persistent and rides
+    // on every message the member sends, where an off-topic message scrolls
+    // away. So a name notice acts even at low severity, and message-level tone
+    // and topic stay audit-only as designed. Without this the join-name routing
+    // would classify correctly and then post nothing.
     if config.service.mode == Mode::Warn
         || (config.service.mode == Mode::Enforce
             && classifier.classification.verdict == Verdict::BanSevereHarm
             && projected_action == crate::policy::PolicyAction::WarnAsModerator)
+        || (config.service.mode == Mode::Enforce && join_name_candidate)
     {
         schedule_warning_if_eligible(
             &config,
@@ -1262,6 +1269,26 @@ mod tests {
                 "{flag} is passed to riverctl but not checked by the startup preflight"
             );
         }
+    }
+
+    /// A display-name notice must actually reach the room in Enforce mode.
+    /// Routing a name for review and then dropping the verdict silently is the
+    /// dead-path failure this codebase already has once, in BanAsOwnerEmergency.
+    #[test]
+    fn enforce_mode_acts_on_display_name_notices_but_not_message_topic() {
+        let source = include_str!("runtime.rs");
+        let gate = source
+            .split("schedule_warning_if_eligible(")
+            .next()
+            .and_then(|s| {
+                s.rfind("if config.service.mode == Mode::Warn")
+                    .map(|i| &s[i..])
+            })
+            .expect("the low-severity dispatch gate must exist");
+        assert!(
+            gate.contains("join_name_candidate"),
+            "Enforce must dispatch display-name notices, or the join-name routing posts nothing"
+        );
     }
 
     #[test]
