@@ -14,6 +14,27 @@ pub enum NoticeSubject {
 
 // Fixed, source-defined text. Model output can never reach these strings.
 //
+// TONE LADDER. Severity sets the register, and the register is what decides
+// whether a public notice educates the room or humiliates the member. These are
+// posted in front of everyone, which is deliberate -- visible enforcement is how
+// a room learns its norms and how it feels tended rather than arbitrary. The
+// cost of that visibility is paid in framing, not venue:
+//
+//   Nudge (first, minor)  -- states the NORM, impersonally. No "you", no
+//                            characterisation, no consequence. A sign on a
+//                            wall. Anyone can comply without losing face,
+//                            which is what makes compliance likely.
+//   Warning (repeat)      -- names the artifact ("Your display name") and the
+//                            consequence. Personal now, because they have had
+//                            their chance, but still about the thing, not them.
+//   Severe               -- never reaches here. Hate and threats go to the ban
+//                            path; the room sees the removal, which is the
+//                            only statement needed.
+//
+// The invariant across all of them: describe the artifact, never the person.
+// "Display names must be safe for work" and "you are being offensive" carry the
+// same information and cost completely different amounts of goodwill.
+//
 // Register: stern and factual. This is an automated moderator with authority in
 // the room, and it should read like one — state the rule, state the consequence,
 // stop. No slang, no banter, no first person, no attempt to sound like a person
@@ -22,13 +43,11 @@ pub enum NoticeSubject {
 
 /// First notice. States the rule; no consequence yet, because nothing has
 /// escalated.
-pub const CONDUCT_NUDGE: &str = "Address the argument, not the person.";
-pub const TOPIC_NUDGE: &str = "Off topic. This room is for Freenet and related technical work.";
+pub const CONDUCT_NUDGE: &str = "This room addresses arguments, not people.";
+pub const TOPIC_NUDGE: &str = "This room is for Freenet and related technical work.";
 
-pub const NAME_TOPIC_NUDGE: &str =
-    "Display names must be safe for work: no profanity, no slogans. Change it.";
-pub const NAME_CONDUCT_NUDGE: &str =
-    "Display names must be safe for work: no profanity, no slurs. Change it.";
+pub const NAME_TOPIC_NUDGE: &str = "Display names must be safe for work: no profanity, no slogans.";
+pub const NAME_CONDUCT_NUDGE: &str = "Display names must be safe for work: no profanity, no slurs.";
 
 pub fn fixed_nudge(category: Category, subject: NoticeSubject) -> &'static str {
     match (subject, category) {
@@ -90,7 +109,7 @@ mod tests {
             fixed_warning(Category::PersonalAttack, NoticeSubject::Message),
             "Personal attacks are not permitted. Continuing will result in removal. Rejoining requires a new invitation, which may be unavailable for 24 hours."
         );
-        assert_eq!(CONDUCT_NUDGE, "Address the argument, not the person.");
+        assert_eq!(CONDUCT_NUDGE, "This room addresses arguments, not people.");
         assert_eq!(
             fixed_nudge(Category::OffTopic, NoticeSubject::Message),
             TOPIC_NUDGE
@@ -149,6 +168,31 @@ mod tests {
                     assert!(
                         text.ends_with('.'),
                         "{text:?} should be a plain declarative statement"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A nudge must not address the member at all. Second person turns a norm
+    /// posted in front of the room into a public verdict on a person, which is
+    /// the difference between educating the room and humiliating someone.
+    #[test]
+    fn nudges_state_a_norm_without_addressing_the_member() {
+        for category in [
+            Category::OffTopic,
+            Category::Incivility,
+            Category::PersonalAttack,
+            Category::Flooding,
+            Category::Hate,
+            Category::Other,
+        ] {
+            for subject in [NoticeSubject::Message, NoticeSubject::DisplayName] {
+                let text = fixed_nudge(category, subject).to_lowercase();
+                for second_person in ["you ", "your ", "you'", "yours"] {
+                    assert!(
+                        !text.contains(second_person),
+                        "a first notice must not address the member: {text:?}"
                     );
                 }
             }
