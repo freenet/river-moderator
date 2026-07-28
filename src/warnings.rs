@@ -26,9 +26,9 @@ pub const CONDUCT_NUDGE: &str = "Address the argument, not the person.";
 pub const TOPIC_NUDGE: &str = "Off topic. This room is for Freenet and related technical work.";
 
 pub const NAME_TOPIC_NUDGE: &str =
-    "Your display name is off topic. This room is for Freenet and related technical work. \
-     Change it.";
-pub const NAME_CONDUCT_NUDGE: &str = "Your display name is not appropriate here. Change it.";
+    "Display names must be safe for work: no profanity, no slogans. Change it.";
+pub const NAME_CONDUCT_NUDGE: &str =
+    "Display names must be safe for work: no profanity, no slurs. Change it.";
 
 pub fn fixed_nudge(category: Category, subject: NoticeSubject) -> &'static str {
     match (subject, category) {
@@ -44,13 +44,14 @@ pub fn fixed_warning(category: Category, subject: NoticeSubject) -> &'static str
     if subject == NoticeSubject::DisplayName {
         return match category {
             Category::OffTopic => {
-                "Your display name is off topic. This room is for Freenet and related \
-                 technical work. Change it or you will be removed. Rejoining requires a new \
-                 invitation, which may be unavailable for 24 hours."
+                "Display names must be safe for work: no profanity, no slogans. Change it or \
+                 you will be removed. Rejoining requires a new invitation, which may be \
+                 unavailable for 24 hours."
             }
             _ => {
-                "Your display name is not appropriate here. Change it or you will be removed. \
-                 Rejoining requires a new invitation, which may be unavailable for 24 hours."
+                "Display names must be safe for work: no profanity, no slurs. Change it or \
+                 you will be removed. Rejoining requires a new invitation, which may be \
+                 unavailable for 24 hours."
             }
         };
     }
