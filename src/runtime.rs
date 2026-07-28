@@ -895,6 +895,11 @@ fn schedule_warning_if_eligible(
         action,
         category,
         about_display_name,
+        screened_nickname: if about_display_name {
+            message.nickname.clone()
+        } else {
+            String::new()
+        },
         created_at: message.first_observed_at,
         execute_after: if config.service.mode == Mode::Enforce {
             message.first_observed_at
@@ -971,6 +976,38 @@ async fn warning_loop(config: Arc<Config>, state: Arc<ModerationState>) {
                     tracing::error!(error = %format!("{error:#}"), "failed to record warning preflight failure");
                 }
                 continue;
+            }
+        }
+        if pending.about_display_name {
+            match state.display_name_is_current(
+                &pending.room_owner,
+                &pending.target_member_id,
+                &pending.screened_nickname,
+            ) {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::info!(
+                        decision_id = %pending.decision_id,
+                        member_id = %pending.target_member_id,
+                        "display-name notice suppressed; the member already renamed"
+                    );
+                    if let Err(error) = state.complete_low_severity(
+                        &pending,
+                        LowSeverityOutcome::SuppressedChangedOrDeleted,
+                        Utc::now(),
+                    ) {
+                        tracing::error!(error = %format!("{error:#}"), "failed to record suppressed name notice");
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    tracing::error!(
+                        error = %format!("{error:#}"),
+                        decision_id = %pending.decision_id,
+                        "failed display-name preflight; refusing to send"
+                    );
+                    continue;
+                }
             }
         }
         let subject = if pending.about_display_name {
