@@ -330,38 +330,51 @@ async fn process_message(
         );
         return Ok(());
     }
-    let join_name_candidate = if is_routine_join_notice(&message) {
-        match name_guard::inspect(&message.nickname, &config.room.protected_nicknames) {
-            NameGuardAction::Observe => {
+    // Screen the display name on ANY message, not only the join notice: a
+    // member can join with an innocuous name and rename to a hostile one
+    // afterwards, and the name rides on every message either way. The claim
+    // table makes this once per (member, name), so a rename re-screens and an
+    // unchanged name does not buy a model call per message.
+    let name_action = name_guard::inspect(&message.nickname, &config.room.protected_nicknames);
+    let join_name_candidate = match name_action {
+        NameGuardAction::Observe => {
+            if is_routine_join_notice(&message) {
                 tracing::info!(
                     member_id = %message.author_id,
                     nickname = %message.nickname,
                     content_hash = %short_hash(&message.content_hash()),
                     "routine join notice recorded; nickname guard allowed"
                 );
-                false
             }
-            NameGuardAction::Ban { reason } if is_protected => {
+            false
+        }
+        NameGuardAction::Ban { ref reason } if is_protected => {
+            tracing::warn!(
+                member_id = %message.author_id,
+                nickname = %message.nickname,
+                reason = %reason,
+                "nickname guard refused protected identity target"
+            );
+            false
+        }
+        NameGuardAction::Ban { ref reason } => {
+            let first_time = state.claim_name_screening(
+                &message.room_owner,
+                &message.author_id,
+                &message.nickname,
+                Utc::now(),
+            )?;
+            if first_time {
                 tracing::warn!(
                     member_id = %message.author_id,
                     nickname = %message.nickname,
                     reason = %reason,
-                    "nickname guard refused protected identity target"
-                );
-                false
-            }
-            NameGuardAction::Ban { reason } => {
-                tracing::warn!(
-                    member_id = %message.author_id,
-                    nickname = %message.nickname,
-                    reason = %reason,
+                    renamed = !is_routine_join_notice(&message),
                     "nickname guard triggered model verification before any action"
                 );
-                true
             }
+            first_time
         }
-    } else {
-        false
     };
     if is_routine_join_notice(&message) && !join_name_candidate {
         return Ok(());

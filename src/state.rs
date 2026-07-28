@@ -17,6 +17,11 @@ const PENDING_LOW_SEVERITY: TableDefinition<&str, &[u8]> =
     TableDefinition::new("pending_low_severity_v1");
 const ACTION_LIMITS: TableDefinition<&str, &[u8]> = TableDefinition::new("action_limits_v1");
 const REPORT_OUTCOMES: TableDefinition<&str, &[u8]> = TableDefinition::new("report_outcomes_v1");
+/// Display names already sent for review, keyed by member AND normalized name.
+/// Keyed on both so a rename to a fresh bad name screens again, while an
+/// unchanged bad name does not buy a model call on every message the member
+/// sends.
+const SCREENED_NAMES: TableDefinition<&str, &[u8]> = TableDefinition::new("screened_names_v1");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EventDisposition {
@@ -139,6 +144,7 @@ impl ModerationState {
         write.open_table(PENDING_LOW_SEVERITY)?;
         write.open_table(ACTION_LIMITS)?;
         write.open_table(REPORT_OUTCOMES)?;
+        write.open_table(SCREENED_NAMES)?;
         write.commit()?;
         Ok(Self { database })
     }
@@ -306,6 +312,38 @@ impl ModerationState {
         selected.sort_by_key(|message| message.first_observed_at);
         selected.dedup_by(|left, right| left.message_id == right.message_id);
         Ok(selected)
+    }
+
+    /// Claim a (member, display name) pair for review, once.
+    ///
+    /// Returns true the first time a given member is seen under a given
+    /// normalized name, so both a join with a bad name and a later rename to
+    /// one are screened, and neither is re-screened per message.
+    pub fn claim_name_screening(
+        &self,
+        room_owner: &str,
+        member_id: &str,
+        nickname: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        let normalized = crate::name_guard::normalize(nickname);
+        let key = format!("{room_owner}|{member_id}|{normalized}");
+        let read = self.database.begin_read()?;
+        if read
+            .open_table(SCREENED_NAMES)?
+            .get(key.as_str())?
+            .is_some()
+        {
+            return Ok(false);
+        }
+        drop(read);
+        let encoded = serde_json::to_vec(&now)?;
+        let write = self.database.begin_write()?;
+        write
+            .open_table(SCREENED_NAMES)?
+            .insert(key.as_str(), encoded.as_slice())?;
+        write.commit()?;
+        Ok(true)
     }
 
     pub fn record_report_outcome(
@@ -792,6 +830,50 @@ mod tests {
             .unwrap();
         assert_eq!(edited, EventDisposition::Edited);
         assert_eq!(edit.first_observed_at, at(1));
+    }
+
+    /// A member can join with a clean name and rename to a hostile one later,
+    /// so screening must be keyed on the name, not on the join event. And an
+    /// unchanged name must not buy a model call on every message.
+    #[test]
+    fn name_screening_claims_once_per_name_and_again_after_a_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = ModerationState::from_database(std::sync::Arc::new(
+            redb::Database::create(dir.path().join("s.redb")).unwrap(),
+        ))
+        .unwrap();
+        let now = Utc::now();
+
+        assert!(
+            state
+                .claim_name_screening("room", "M1", "Fuck ICE", now)
+                .unwrap(),
+            "first sighting must screen"
+        );
+        assert!(
+            !state
+                .claim_name_screening("room", "M1", "Fuck ICE", now)
+                .unwrap(),
+            "same name again must not re-screen"
+        );
+        assert!(
+            !state
+                .claim_name_screening("room", "M1", "fuck  ice", now)
+                .unwrap(),
+            "normalization means spacing changes are the same name"
+        );
+        assert!(
+            state
+                .claim_name_screening("room", "M1", "Fuck Biden", now)
+                .unwrap(),
+            "a rename to a different name must screen again"
+        );
+        assert!(
+            state
+                .claim_name_screening("room", "M2", "Fuck ICE", now)
+                .unwrap(),
+            "a different member with the same name must screen"
+        );
     }
 
     #[test]
