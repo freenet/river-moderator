@@ -17,6 +17,11 @@ const PENDING_LOW_SEVERITY: TableDefinition<&str, &[u8]> =
     TableDefinition::new("pending_low_severity_v1");
 const ACTION_LIMITS: TableDefinition<&str, &[u8]> = TableDefinition::new("action_limits_v1");
 const REPORT_OUTCOMES: TableDefinition<&str, &[u8]> = TableDefinition::new("report_outcomes_v1");
+/// Display names already sent for review, keyed by member AND normalized name.
+/// Keyed on both so a rename to a fresh bad name screens again, while an
+/// unchanged bad name does not buy a model call on every message the member
+/// sends.
+const SCREENED_NAMES: TableDefinition<&str, &[u8]> = TableDefinition::new("screened_names_v1");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EventDisposition {
@@ -94,6 +99,15 @@ pub struct PendingLowSeverity {
     pub classified_content_hash: String,
     pub action: LowSeverityAction,
     pub category: Category,
+    /// Whether the notice is about the member's display name rather than a
+    /// message. Defaults false so pre-existing records deserialize; they are
+    /// dropped as stale by `policy_version` anyway.
+    #[serde(default)]
+    pub about_display_name: bool,
+    /// The name that was screened, so a rename before the notice fires can
+    /// suppress it. Empty for message notices.
+    #[serde(default)]
+    pub screened_nickname: String,
     pub created_at: DateTime<Utc>,
     pub execute_after: DateTime<Utc>,
     pub cancelled_by_member_id: Option<String>,
@@ -134,6 +148,7 @@ impl ModerationState {
         write.open_table(PENDING_LOW_SEVERITY)?;
         write.open_table(ACTION_LIMITS)?;
         write.open_table(REPORT_OUTCOMES)?;
+        write.open_table(SCREENED_NAMES)?;
         write.commit()?;
         Ok(Self { database })
     }
@@ -260,6 +275,39 @@ impl ModerationState {
             && stored.deleted_at.is_none())
     }
 
+    /// Whether the member is still using the display name that was screened.
+    ///
+    /// The parallel of `message_is_current` for names. Without it a queued
+    /// notice fires at someone who already renamed, scolding them for a name
+    /// they no longer have. That happened in practice on 2026-07-27: a member
+    /// joined as "Fuck ICE" and had renamed himself before anyone acted.
+    /// Telling him off afterwards would make the moderator look broken, which
+    /// costs more goodwill than the original name did.
+    pub fn display_name_is_current(
+        &self,
+        room_owner: &str,
+        member_id: &str,
+        screened_nickname: &str,
+    ) -> Result<bool> {
+        let screened = crate::name_guard::normalize(screened_nickname);
+        let read = self.database.begin_read()?;
+        let table = read.open_table(HISTORY)?;
+        let Some(value) = table.get(room_owner)? else {
+            return Ok(false);
+        };
+        let history: Vec<VerifiedMessage> = serde_json::from_slice(value.value())?;
+        // The member's most recent message carries the name they use now.
+        let Some(latest) = history
+            .iter()
+            .rev()
+            .find(|message| message.author_id == member_id)
+        else {
+            // No trace of them: treat as stale rather than notify into the void.
+            return Ok(false);
+        };
+        Ok(crate::name_guard::normalize(&latest.nickname) == screened)
+    }
+
     pub fn context(
         &self,
         room_owner: &str,
@@ -301,6 +349,38 @@ impl ModerationState {
         selected.sort_by_key(|message| message.first_observed_at);
         selected.dedup_by(|left, right| left.message_id == right.message_id);
         Ok(selected)
+    }
+
+    /// Claim a (member, display name) pair for review, once.
+    ///
+    /// Returns true the first time a given member is seen under a given
+    /// normalized name, so both a join with a bad name and a later rename to
+    /// one are screened, and neither is re-screened per message.
+    pub fn claim_name_screening(
+        &self,
+        room_owner: &str,
+        member_id: &str,
+        nickname: &str,
+        now: DateTime<Utc>,
+    ) -> Result<bool> {
+        let normalized = crate::name_guard::normalize(nickname);
+        let key = format!("{room_owner}|{member_id}|{normalized}");
+        let read = self.database.begin_read()?;
+        if read
+            .open_table(SCREENED_NAMES)?
+            .get(key.as_str())?
+            .is_some()
+        {
+            return Ok(false);
+        }
+        drop(read);
+        let encoded = serde_json::to_vec(&now)?;
+        let write = self.database.begin_write()?;
+        write
+            .open_table(SCREENED_NAMES)?
+            .insert(key.as_str(), encoded.as_slice())?;
+        write.commit()?;
+        Ok(true)
     }
 
     pub fn record_report_outcome(
@@ -789,6 +869,89 @@ mod tests {
         assert_eq!(edit.first_observed_at, at(1));
     }
 
+    /// A member can join with a clean name and rename to a hostile one later,
+    /// so screening must be keyed on the name, not on the join event. And an
+    /// unchanged name must not buy a model call on every message.
+    /// A member who renames before the notice fires must not be told off for a
+    /// name they no longer have. This happened for real on 2026-07-27.
+    #[test]
+    fn display_name_currency_follows_a_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = ModerationState::from_database(std::sync::Arc::new(
+            redb::Database::create(dir.path().join("s.redb")).unwrap(),
+        ))
+        .unwrap();
+        let now = Utc::now();
+        let mut bad = message("m1", "hello", now);
+        bad.author_id = "M1".into();
+        bad.nickname = "Fuck ICE".into();
+        state.record_message(bad, 200, 4096).unwrap();
+        assert!(
+            state
+                .display_name_is_current("room", "M1", "Fuck ICE")
+                .unwrap(),
+            "unchanged name must still be current"
+        );
+
+        let mut renamed = message("m2", "hello again", now + Duration::seconds(30));
+        renamed.author_id = "M1".into();
+        renamed.nickname = "Quantum Lattice".into();
+        state.record_message(renamed, 200, 4096).unwrap();
+        assert!(
+            !state
+                .display_name_is_current("room", "M1", "Fuck ICE")
+                .unwrap(),
+            "after a rename the queued notice must be suppressed"
+        );
+        assert!(
+            state
+                .display_name_is_current("room", "M1", "Quantum Lattice")
+                .unwrap(),
+            "the new name is what is current"
+        );
+    }
+
+    #[test]
+    fn name_screening_claims_once_per_name_and_again_after_a_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = ModerationState::from_database(std::sync::Arc::new(
+            redb::Database::create(dir.path().join("s.redb")).unwrap(),
+        ))
+        .unwrap();
+        let now = Utc::now();
+
+        assert!(
+            state
+                .claim_name_screening("room", "M1", "Fuck ICE", now)
+                .unwrap(),
+            "first sighting must screen"
+        );
+        assert!(
+            !state
+                .claim_name_screening("room", "M1", "Fuck ICE", now)
+                .unwrap(),
+            "same name again must not re-screen"
+        );
+        assert!(
+            !state
+                .claim_name_screening("room", "M1", "fuck  ice", now)
+                .unwrap(),
+            "normalization means spacing changes are the same name"
+        );
+        assert!(
+            state
+                .claim_name_screening("room", "M1", "Fuck Biden", now)
+                .unwrap(),
+            "a rename to a different name must screen again"
+        );
+        assert!(
+            state
+                .claim_name_screening("room", "M2", "Fuck ICE", now)
+                .unwrap(),
+            "a different member with the same name must screen"
+        );
+    }
+
     #[test]
     fn context_includes_room_and_same_author_without_duplicates() {
         let dir = tempdir().unwrap();
@@ -965,6 +1128,8 @@ mod tests {
                 classified_content_hash: "hash".into(),
                 action: LowSeverityAction::Nudge,
                 category: Category::Incivility,
+                about_display_name: false,
+                screened_nickname: String::new(),
                 created_at: at(1),
                 execute_after: at(1) + Duration::seconds(60),
                 cancelled_by_member_id: None,
@@ -1010,6 +1175,8 @@ mod tests {
                     classified_content_hash: "hash".into(),
                     action: LowSeverityAction::FormalWarning,
                     category: Category::OffTopic,
+                    about_display_name: false,
+                    screened_nickname: String::new(),
                     created_at: at(1),
                     execute_after: at(2),
                     cancelled_by_member_id: None,
@@ -1070,6 +1237,8 @@ mod tests {
                 classified_content_hash: "hash".into(),
                 action: LowSeverityAction::Nudge,
                 category: Category::Incivility,
+                about_display_name: false,
+                screened_nickname: String::new(),
                 created_at: at(1),
                 execute_after: at(2),
                 cancelled_by_member_id: None,

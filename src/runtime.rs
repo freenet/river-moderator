@@ -19,14 +19,14 @@ use crate::{
     name_guard::{self, NameGuardAction},
     openai_model::OpenAiModelClient,
     policy::{decide, PolicyInput},
-    river_action::{ban_member_safely, send_fixed_reply},
+    river_action::{ban_member_safely, send_fixed_reply, verify_ban_guards},
     river_stream::{spawn_reader, RoomEvent},
     state::{
         BanClaim, EventDisposition, LowSeverityAction, LowSeverityOutcome, ModerationState,
         PendingBan, PendingLowSeverity, WarningRecord,
     },
     verdict::{Category, Verdict},
-    warnings::{fixed_nudge, fixed_warning},
+    warnings::{fixed_nudge, fixed_warning, NoticeSubject},
 };
 
 const MODEL_REQUEST_OVERHEAD_BYTES: u64 = 6_000;
@@ -55,6 +55,11 @@ pub async fn run_moderator(config: Config) -> Result<()> {
         decisions: Arc::new(DecisionAuditLog::open(&config.audit.decision_path)?),
         bans: Arc::new(AuditLog::open(&config.audit.path)?),
     };
+    // Refuse to start rather than discover at ban time that the configured
+    // riverctl cannot enforce the guards.
+    if matches!(config.service.mode, Mode::Enforce) {
+        verify_ban_guards(&config.river).await?;
+    }
     let model = Arc::new(OpenAiModelClient::new(&config.model)?);
     let config = Arc::new(config);
     if matches!(config.service.mode, Mode::Warn | Mode::Enforce) {
@@ -146,11 +151,54 @@ pub async fn run_moderator(config: Config) -> Result<()> {
     anyhow::bail!("River event channel closed")
 }
 
+/// First reconnect delay. Short, because most reader exits are a single blip
+/// and waiting out a long backoff is dead time for moderation.
+const RECONNECT_BASE_DELAY_MILLIS: u64 = 1_000;
+
+/// Ceiling on the reconnect delay. Capped low enough that a sustained outage
+/// still leaves the room checked roughly twice a minute.
+const RECONNECT_MAX_DELAY_MILLIS: u64 = 30_000;
+
+/// A session lasting at least this long counts as healthy and resets the
+/// backoff, so one bad patch does not slow recovery for the rest of the day.
+const HEALTHY_SESSION_SECONDS: u64 = 30;
+
+/// Spread reconnects by ±20% so a node that is refusing subscriptions does not
+/// get retried on a metronome, and so restarts do not line up. Derived from the
+/// clock rather than adding an RNG dependency for a single jitter value.
+fn jittered_delay(delay_millis: u64) -> std::time::Duration {
+    let spread = delay_millis / 5;
+    if spread == 0 {
+        return std::time::Duration::from_millis(delay_millis);
+    }
+    let entropy = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| u64::from(since.subsec_nanos()))
+        .unwrap_or(0);
+    let offset = entropy % (2 * spread);
+    std::time::Duration::from_millis(delay_millis.saturating_sub(spread).saturating_add(offset))
+}
+
 async fn reader_loop(config: Arc<Config>, sender: mpsc::Sender<RoomEvent>) {
+    // The reader has been observed exiting ~55 times an hour with "Unexpected
+    // response to SUBSCRIBE request", median session life 3s. A fixed 5s retry
+    // hammers a node that is already refusing.
+    //
+    // Each reconnect also replays whatever the local room cache had not yet
+    // seen. That is correct catch-up, not a bug, and it is how messages posted
+    // during a blind window still get moderated: `--initial-messages 0`
+    // suppresses history, and `subscribe_and_stream` seeds its seen-set from
+    // local state first. But the whole catch-up batch shares one arrival
+    // instant, which is what corrupted the burst signals behind the flooding
+    // false positive; see `event::within_burst`. Fewer reconnects means fewer
+    // such batches, so this backoff reduces the exposure even though the real
+    // correction lives in the signal computation.
+    let mut delay_millis = RECONNECT_BASE_DELAY_MILLIS;
     loop {
         match spawn_reader(&config.river, &config.room.owner_verifying_key) {
             Ok(mut reader) => {
                 tracing::info!(riverctl_pid = reader.process_id(), "River reader connected");
+                let connected_at = Instant::now();
                 loop {
                     match reader.next_event(config.river.max_event_bytes).await {
                         Ok(Some(event)) => match sender.try_send(event) {
@@ -173,13 +221,24 @@ async fn reader_loop(config: Arc<Config>, sender: mpsc::Sender<RoomEvent>) {
                         }
                     }
                 }
+                if connected_at.elapsed().as_secs() >= HEALTHY_SESSION_SECONDS {
+                    delay_millis = RECONNECT_BASE_DELAY_MILLIS;
+                }
             }
             Err(error) => tracing::error!(
                 error = %format!("{error:#}"),
                 "could not start River reader"
             ),
         }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        let wait = jittered_delay(delay_millis);
+        tracing::debug!(
+            delay_ms = wait.as_millis() as u64,
+            "waiting before River reader reconnect"
+        );
+        tokio::time::sleep(wait).await;
+        delay_millis = delay_millis
+            .saturating_mul(2)
+            .min(RECONNECT_MAX_DELAY_MILLIS);
     }
 }
 
@@ -271,38 +330,51 @@ async fn process_message(
         );
         return Ok(());
     }
-    let join_name_candidate = if is_routine_join_notice(&message) {
-        match name_guard::inspect(&message.nickname, &config.room.protected_nicknames) {
-            NameGuardAction::Observe => {
+    // Screen the display name on ANY message, not only the join notice: a
+    // member can join with an innocuous name and rename to a hostile one
+    // afterwards, and the name rides on every message either way. The claim
+    // table makes this once per (member, name), so a rename re-screens and an
+    // unchanged name does not buy a model call per message.
+    let name_action = name_guard::inspect(&message.nickname, &config.room.protected_nicknames);
+    let join_name_candidate = match name_action {
+        NameGuardAction::Observe => {
+            if is_routine_join_notice(&message) {
                 tracing::info!(
                     member_id = %message.author_id,
                     nickname = %message.nickname,
                     content_hash = %short_hash(&message.content_hash()),
                     "routine join notice recorded; nickname guard allowed"
                 );
-                false
             }
-            NameGuardAction::Ban { reason } if is_protected => {
+            false
+        }
+        NameGuardAction::Ban { ref reason } if is_protected => {
+            tracing::warn!(
+                member_id = %message.author_id,
+                nickname = %message.nickname,
+                reason = %reason,
+                "nickname guard refused protected identity target"
+            );
+            false
+        }
+        NameGuardAction::Ban { ref reason } => {
+            let first_time = state.claim_name_screening(
+                &message.room_owner,
+                &message.author_id,
+                &message.nickname,
+                Utc::now(),
+            )?;
+            if first_time {
                 tracing::warn!(
                     member_id = %message.author_id,
                     nickname = %message.nickname,
                     reason = %reason,
-                    "nickname guard refused protected identity target"
-                );
-                false
-            }
-            NameGuardAction::Ban { reason } => {
-                tracing::warn!(
-                    member_id = %message.author_id,
-                    nickname = %message.nickname,
-                    reason = %reason,
+                    renamed = !is_routine_join_notice(&message),
                     "nickname guard triggered model verification before any action"
                 );
-                true
             }
+            first_time
         }
-    } else {
-        false
     };
     if is_routine_join_notice(&message) && !join_name_candidate {
         return Ok(());
@@ -524,10 +596,17 @@ async fn process_message(
         requests_today = budget_status.requests_today,
         "moderation decision"
     );
+    // Enforce deliberately leaves ordinary tone and topic decisions in the audit
+    // log (README). A display name is the exception: it is persistent and rides
+    // on every message the member sends, where an off-topic message scrolls
+    // away. So a name notice acts even at low severity, and message-level tone
+    // and topic stay audit-only as designed. Without this the join-name routing
+    // would classify correctly and then post nothing.
     if config.service.mode == Mode::Warn
         || (config.service.mode == Mode::Enforce
             && classifier.classification.verdict == Verdict::BanSevereHarm
             && projected_action == crate::policy::PolicyAction::WarnAsModerator)
+        || (config.service.mode == Mode::Enforce && join_name_candidate)
     {
         schedule_warning_if_eligible(
             &config,
@@ -536,6 +615,7 @@ async fn process_message(
             &decision_id,
             classifier.classification.category,
             projected_action,
+            join_name_candidate,
         )?;
     }
     if config.service.mode == Mode::Enforce
@@ -793,6 +873,7 @@ fn schedule_warning_if_eligible(
     decision_id: &str,
     category: Category,
     action: crate::policy::PolicyAction,
+    about_display_name: bool,
 ) -> Result<()> {
     if let Some(activation_at) = config.service.activation_at {
         if message.first_observed_at < activation_at {
@@ -813,6 +894,12 @@ fn schedule_warning_if_eligible(
         classified_content_hash: message.content_hash(),
         action,
         category,
+        about_display_name,
+        screened_nickname: if about_display_name {
+            message.nickname.clone()
+        } else {
+            String::new()
+        },
         created_at: message.first_observed_at,
         execute_after: if config.service.mode == Mode::Enforce {
             message.first_observed_at
@@ -891,9 +978,46 @@ async fn warning_loop(config: Arc<Config>, state: Arc<ModerationState>) {
                 continue;
             }
         }
+        if pending.about_display_name {
+            match state.display_name_is_current(
+                &pending.room_owner,
+                &pending.target_member_id,
+                &pending.screened_nickname,
+            ) {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::info!(
+                        decision_id = %pending.decision_id,
+                        member_id = %pending.target_member_id,
+                        "display-name notice suppressed; the member already renamed"
+                    );
+                    if let Err(error) = state.complete_low_severity(
+                        &pending,
+                        LowSeverityOutcome::SuppressedChangedOrDeleted,
+                        Utc::now(),
+                    ) {
+                        tracing::error!(error = %format!("{error:#}"), "failed to record suppressed name notice");
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    tracing::error!(
+                        error = %format!("{error:#}"),
+                        decision_id = %pending.decision_id,
+                        "failed display-name preflight; refusing to send"
+                    );
+                    continue;
+                }
+            }
+        }
+        let subject = if pending.about_display_name {
+            NoticeSubject::DisplayName
+        } else {
+            NoticeSubject::Message
+        };
         let text = match pending.action {
-            LowSeverityAction::Nudge => fixed_nudge(pending.category),
-            LowSeverityAction::FormalWarning => fixed_warning(pending.category),
+            LowSeverityAction::Nudge => fixed_nudge(pending.category, subject),
+            LowSeverityAction::FormalWarning => fixed_warning(pending.category, subject),
         };
         match send_fixed_reply(
             &config.river,
@@ -1026,6 +1150,7 @@ fn is_high_signal_message(
                 .count()
                 < message.content.chars().count() / 4)
         || compression_ratio_is_suspicious(&message.content)
+        || name_guard::contains_severe_slur(&message.content)
         || {
             let lower = message.content.to_ascii_lowercase();
             ["dm me", "message me", "cash app", "send crypto"]
@@ -1057,6 +1182,19 @@ fn compression_ratio_is_suspicious(content: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// Signals for a lone message from an otherwise idle author, so these
+    /// tests exercise the content clause and nothing else.
+    fn quiet_signals() -> crate::event::TemporalSignals {
+        crate::event::TemporalSignals {
+            author_messages_10_seconds: 1,
+            author_messages_1_minute: 1,
+            author_messages_5_minutes: 1,
+            milliseconds_since_author_previous: None,
+            exact_duplicate_count_5_minutes: 0,
+            claimed_clock_skew_seconds: 0,
+        }
+    }
+
     fn message(content: &str) -> VerifiedMessage {
         VerifiedMessage {
             message_id: "message".into(),
@@ -1070,6 +1208,137 @@ mod tests {
             reply_to_message_id: None,
             reply_to_author_id: None,
         }
+    }
+
+    /// The router was blind to what a message said. On 2026-07-26 a member
+    /// posted "redditfag" and then "tranny faggots love to censor..."; neither
+    /// drew any review, and the account was examined only four minutes later
+    /// when another member reported it by hand. Both lines are verbatim.
+    ///
+    /// Measured against every distinct message the room saw that day (1,630 of
+    /// them), this clause fires on 6 and none of the 6 is a false positive.
+    #[test]
+    fn routes_messages_containing_severe_slurs_for_review() {
+        let quiet = quiet_signals();
+        for content in [
+            "redditfag",
+            "yes because tranny faggots love to censor boo boo words that hurts their delusions",
+            "Calling all glowniggers, come in",
+            "eu chat control is a nigger",
+        ] {
+            assert!(
+                is_high_signal_message(&message(content), &quiet),
+                "{content:?} should route for review"
+            );
+        }
+    }
+
+    /// Ordinary conversation must not buy a model call. These are real messages
+    /// from the same room and day, including ones from the account that was
+    /// eventually banned, taken from before it began using slurs.
+    #[test]
+    fn does_not_route_ordinary_conversation() {
+        let quiet = quiet_signals();
+        for content in [
+            "sounds like a skill issue",
+            "this is simply logic",
+            "no matter what your opinion on the topic is, i can overpower you in many forms",
+            "I am currently using `riverctl`, and also River webUI on other VM.",
+            "wtf is your username???",
+        ] {
+            assert!(
+                !is_high_signal_message(&message(content), &quiet),
+                "{content:?} should not route for review"
+            );
+        }
+    }
+
+    #[test]
+    fn reconnect_backoff_grows_and_is_capped() {
+        let mut delay = RECONNECT_BASE_DELAY_MILLIS;
+        let mut seen = vec![delay];
+        for _ in 0..12 {
+            delay = delay.saturating_mul(2).min(RECONNECT_MAX_DELAY_MILLIS);
+            seen.push(delay);
+        }
+        assert_eq!(seen[0], 1_000, "first retry stays fast for a single blip");
+        assert!(seen.windows(2).all(|w| w[1] >= w[0]), "must be monotonic");
+        assert_eq!(
+            *seen.last().unwrap(),
+            RECONNECT_MAX_DELAY_MILLIS,
+            "a sustained outage must still recheck about twice a minute"
+        );
+    }
+
+    /// Jitter must actually spread the delay, or a node refusing subscriptions
+    /// gets retried on a metronome by every restarted instance at once.
+    #[test]
+    fn reconnect_jitter_stays_within_twenty_percent() {
+        for base in [1_000u64, 4_000, RECONNECT_MAX_DELAY_MILLIS] {
+            for _ in 0..64 {
+                let actual = jittered_delay(base).as_millis() as u64;
+                let spread = base / 5;
+                assert!(
+                    actual >= base - spread && actual <= base + spread,
+                    "{actual} outside +/-20% of {base}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn jitter_handles_a_delay_too_small_to_spread() {
+        assert_eq!(jittered_delay(0).as_millis(), 0);
+        assert_eq!(jittered_delay(4).as_millis(), 4);
+    }
+
+    /// The preflight is only worth anything if it lists the flags the ban
+    /// actually passes. Scrape the call site so adding a guard flag without
+    /// adding it here fails CI instead of silently going unchecked.
+    #[test]
+    fn ban_guard_preflight_covers_every_flag_the_ban_passes() {
+        let source = include_str!("river_action.rs");
+        let ban_fn = source
+            .split("pub async fn ban_member_safely")
+            .nth(1)
+            .expect("ban_member_safely must exist");
+        let passed: Vec<String> = ban_fn
+            .split(".arg(\"")
+            .skip(1)
+            .filter_map(|chunk| chunk.split('"').next())
+            .filter(|flag| flag.starts_with("--require-"))
+            .map(str::to_string)
+            .collect();
+        assert!(
+            !passed.is_empty(),
+            "scrape found no guard flags; fixture broken"
+        );
+        for flag in &passed {
+            assert!(
+                crate::river_action::REQUIRED_BAN_GUARDS.contains(&flag.as_str()),
+                "{flag} is passed to riverctl but not checked by the startup preflight"
+            );
+        }
+    }
+
+    /// A display-name notice must actually reach the room in Enforce mode.
+    /// Routing a name for review and then dropping the verdict silently is the
+    /// dead-path failure this codebase already has once, in BanAsOwnerEmergency.
+    #[test]
+    fn enforce_mode_acts_on_display_name_notices_but_not_message_topic() {
+        let source = include_str!("runtime.rs");
+        let gate = source
+            .split("schedule_warning_if_eligible(")
+            .next()
+            .and_then(|s| {
+                s.rfind("if config.service.mode == Mode::Warn")
+                    .map(|i| &s[i..])
+            })
+            .expect("the low-severity dispatch gate must exist");
+        assert!(
+            gate.contains("join_name_candidate"),
+            "Enforce must dispatch display-name notices, or the join-name routing posts nothing"
+        );
     }
 
     #[test]
