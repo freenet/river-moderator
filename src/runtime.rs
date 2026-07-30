@@ -19,11 +19,12 @@ use crate::{
     name_guard::{self, NameGuardAction},
     openai_model::OpenAiModelClient,
     policy::{decide, PolicyInput},
-    river_action::{ban_member_safely, send_fixed_reply},
+    river_action::{ban_member_safely, delete_own_message, send_fixed_reply},
     river_stream::{spawn_reader, RoomEvent},
     state::{
         BanClaim, EventDisposition, LowSeverityAction, LowSeverityOutcome, ModerationState,
-        PendingBan, PendingLowSeverity, WarningRecord,
+        PendingBan, PendingLowSeverity, PendingTimestampEnforcement, SelfDeleteReason,
+        WarningRecord,
     },
     verdict::{Category, Verdict},
     warnings::{fixed_nudge, fixed_warning},
@@ -61,6 +62,11 @@ pub async fn run_moderator(config: Config) -> Result<()> {
         let action_config = config.clone();
         let action_state = state.clone();
         tokio::spawn(async move { warning_loop(action_config, action_state).await });
+        let timestamp_config = config.clone();
+        let timestamp_state = state.clone();
+        tokio::spawn(
+            async move { timestamp_enforcement_loop(timestamp_config, timestamp_state).await },
+        );
     }
     let (sender, mut receiver) = mpsc::channel(config.limits.queue_depth);
     let reader_config = config.clone();
@@ -276,6 +282,52 @@ async fn process_message(
     if is_service {
         tracing::info!(member_id = %message.author_id, "service-authored message ignored");
         return Ok(());
+    }
+
+    // A message dated far enough ahead pins itself to the bottom of the room:
+    // River orders AND prunes by the sender-supplied time, so it outlives every
+    // legitimate message instead of scrolling away. Detection is deterministic
+    // and needs no model call -- the skew is arithmetic on two timestamps we
+    // already hold, and the classifier is explicitly told not to trust
+    // `author_claimed_at` for anything.
+    //
+    // Processing then CONTINUES rather than returning early. A future-dated
+    // message can also be abusive on its content, and short-circuiting here
+    // would downgrade an immediate severe-harm ban into a two-minute grace
+    // period. Whichever path acts first wins; if the content ban lands, the
+    // member's messages are swept and the pending enforcement finds its target
+    // already gone.
+    let self_delete_reason = if is_protected {
+        None
+    } else if signals.claimed_clock_skew_seconds > config.policy.future_timestamp_seconds {
+        Some(SelfDeleteReason::FutureTimestamp)
+    } else if contains_embedded_image(&message.content) {
+        Some(SelfDeleteReason::EmbeddedImage)
+    } else {
+        None
+    };
+    if let Some(reason) = self_delete_reason {
+        if let Err(error) =
+            begin_self_delete_enforcement(&config, &state, &message, &signals, reason).await
+        {
+            tracing::error!(
+                error = %format!("{error:#}"),
+                member_id = %message.author_id,
+                ?reason,
+                "failed to start self-delete enforcement"
+            );
+        }
+        // An embedded image ends processing here: detection is pure string
+        // matching, and the classifier is a TEXT model that cannot see the image
+        // at all, so a model call could only judge the caption. Spending budget
+        // to do that on a message already scheduled for removal is waste.
+        //
+        // A future-dated message deliberately continues to classification. Its
+        // text IS visible to the model, and short-circuiting would downgrade an
+        // immediate severe-harm ban into a grace period.
+        if reason == SelfDeleteReason::EmbeddedImage {
+            return Ok(());
+        }
     }
     // The room's norms are safe-for-work and on-topic, and both are broken
     // almost entirely by members who have not yet earned tenure. Screening their
@@ -930,6 +982,195 @@ fn schedule_warning_if_eligible(
     Ok(())
 }
 
+/// Detect a markdown image embed.
+///
+/// River renders message text as GFM markdown with raw HTML escaped
+/// (`allow_dangerous_html = false`), so `<img>` cannot be injected directly and
+/// the only route to a rendered image is markdown syntax: `![alt](url)` inline,
+/// or `![alt][ref]` reference style. `url` may be a `data:` URI, so matching on
+/// the syntax rather than on any host list is what actually covers the vector.
+///
+/// Deliberately slightly broad. A false positive costs the author a one-minute
+/// deletion window, not an instant ban, whereas a miss puts arbitrary imagery in
+/// front of the whole room.
+fn contains_embedded_image(content: &str) -> bool {
+    let bytes = content.as_bytes();
+    let mut index = 0;
+    while let Some(offset) = content[index..].find("![") {
+        let start = index + offset + 2;
+        if let Some(close) = content[start..].find(']') {
+            let after = start + close + 1;
+            if matches!(bytes.get(after), Some(b'(') | Some(b'[')) {
+                return true;
+            }
+            index = after;
+        } else {
+            break;
+        }
+    }
+    false
+}
+
+/// Warn the author of a message that must be self-deleted, and queue the
+/// deadline.
+///
+/// Only the author can delete a message, so asking is the only remedy available
+/// short of removing the account.
+async fn begin_self_delete_enforcement(
+    config: &Config,
+    state: &ModerationState,
+    message: &VerifiedMessage,
+    signals: &crate::event::TemporalSignals,
+    reason: SelfDeleteReason,
+) -> Result<()> {
+    let (grace_seconds, warning_text) = match reason {
+        SelfDeleteReason::FutureTimestamp => (
+            config.policy.future_timestamp_grace_seconds,
+            crate::warnings::FUTURE_TIMESTAMP_WARNING,
+        ),
+        SelfDeleteReason::EmbeddedImage => (
+            config.policy.embedded_image_grace_seconds,
+            crate::warnings::EMBEDDED_IMAGE_WARNING,
+        ),
+    };
+    let pending = PendingTimestampEnforcement {
+        reason,
+        room_owner: message.room_owner.clone(),
+        member_id: message.author_id.clone(),
+        target_message_id: message.message_id.clone(),
+        target_content_hash: message.content_hash(),
+        warning_message_id: None,
+        claimed_skew_seconds: signals.claimed_clock_skew_seconds,
+        warned_at: Utc::now(),
+        enforce_after: Utc::now() + Duration::seconds(grace_seconds as i64),
+    };
+    // Reserve BEFORE sending, so a redelivery cannot warn the same message
+    // twice, and so a crash between send and store cannot re-warn on restart.
+    if !state.schedule_timestamp_enforcement(&pending)? {
+        return Ok(());
+    }
+    if config.service.mode != Mode::Enforce {
+        tracing::info!(
+            member_id = %message.author_id,
+            ?reason,
+            "self-delete offence observed; no action outside enforce mode"
+        );
+        return Ok(());
+    }
+    let warning_message_id = send_fixed_reply(
+        &config.river,
+        &message.room_owner,
+        &message.message_id,
+        warning_text,
+    )
+    .await?;
+    // Re-store with the warning's own ID so it can be retracted later. An older
+    // riverctl returns None, in which case the warning simply stays put.
+    let stored = PendingTimestampEnforcement {
+        warning_message_id,
+        ..pending
+    };
+    state.clear_timestamp_enforcement(&stored.room_owner, &stored.target_message_id)?;
+    state.schedule_timestamp_enforcement(&stored)?;
+    tracing::warn!(
+        member_id = %stored.member_id,
+        reason = ?stored.reason,
+        skew_seconds = stored.claimed_skew_seconds,
+        enforce_after = %stored.enforce_after,
+        retractable = stored.warning_message_id.is_some(),
+        "warned a message that must be self-deleted; deadline started"
+    );
+    Ok(())
+}
+
+/// Resolve future-dated messages once their deadline passes.
+///
+/// Deleted in time -> retract the moderator's own warning, since a public notice
+/// pointing at nothing is just litter. Still present -> remove the account,
+/// because nothing else can clear the message.
+async fn timestamp_enforcement_loop(config: Arc<Config>, state: Arc<ModerationState>) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        let due = match state.due_timestamp_enforcements(Utc::now()) {
+            Ok(due) => due,
+            Err(error) => {
+                tracing::error!(error = %format!("{error:#}"), "timestamp enforcement scan failed");
+                continue;
+            }
+        };
+        for pending in due {
+            let still_present = match state.message_is_current(
+                &pending.room_owner,
+                &pending.target_message_id,
+                &pending.member_id,
+                &pending.target_content_hash,
+            ) {
+                Ok(present) => present,
+                Err(error) => {
+                    tracing::error!(
+                        error = %format!("{error:#}"),
+                        "timestamp enforcement preflight failed; refusing to act"
+                    );
+                    let _ = state.clear_timestamp_enforcement(
+                        &pending.room_owner,
+                        &pending.target_message_id,
+                    );
+                    continue;
+                }
+            };
+
+            if !still_present {
+                // They complied (or edited it away). Retract our own notice.
+                if let Some(warning_id) = pending.warning_message_id.as_deref() {
+                    if let Err(error) =
+                        delete_own_message(&config.river, &pending.room_owner, warning_id).await
+                    {
+                        tracing::error!(
+                            error = %format!("{error:#}"),
+                            "could not retract the timestamp warning"
+                        );
+                    }
+                }
+                tracing::info!(
+                    member_id = %pending.member_id,
+                    "future-dated message deleted by its author; warning retracted"
+                );
+                let _ = state
+                    .clear_timestamp_enforcement(&pending.room_owner, &pending.target_message_id);
+                continue;
+            }
+
+            match ban_member_safely(
+                &config.river,
+                &config.room.owner_verifying_key,
+                &pending.member_id,
+            )
+            .await
+            {
+                // No decision-audit record: this path is deterministic and makes
+                // no model call, so there is no `DecisionAuditRecord` to attach.
+                // The ERROR line below is the durable record in journald.
+                Ok(evidence) => {
+                    tracing::error!(
+                        member_id = %pending.member_id,
+                        reason = ?pending.reason,
+                        skew_seconds = pending.claimed_skew_seconds,
+                        evidence = %evidence,
+                        "banned: message not deleted before the deadline"
+                    );
+                }
+                Err(error) => tracing::error!(
+                    error = %format!("{error:#}"),
+                    member_id = %pending.member_id,
+                    "timestamp enforcement ban failed and was not retried"
+                ),
+            }
+            let _ =
+                state.clear_timestamp_enforcement(&pending.room_owner, &pending.target_message_id);
+        }
+    }
+}
+
 async fn warning_loop(config: Arc<Config>, state: Arc<ModerationState>) {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -997,7 +1238,10 @@ async fn warning_loop(config: Arc<Config>, state: Arc<ModerationState>) {
         )
         .await
         {
-            Ok(()) => {
+            // The reply ID is unused on this path for now: retracting a
+            // nudge when its target is deleted needs the ID persisted on
+            // `PendingLowSeverity`, which the timestamp path below does.
+            Ok(_reply_message_id) => {
                 if pending.action == LowSeverityAction::FormalWarning {
                     let warning = WarningRecord {
                         room_owner: pending.room_owner.clone(),
@@ -1498,6 +1742,39 @@ mod tests {
     fn stripping_service_messages_is_a_no_op_without_service_ids() {
         let m = message("ordinary");
         assert_eq!(strip_service_messages(vec![m], &[]).len(), 1);
+    }
+
+    /// River renders GFM markdown, so `![](...)` becomes a live `<img>`. Match
+    /// the syntax, not a host list: the URL may be a `data:` URI.
+    #[test]
+    fn embedded_images_are_detected_by_markdown_syntax() {
+        for embed in [
+            "![](https://example.com/a.png)",
+            "look ![cat](https://example.com/cat.gif) cute",
+            "![x](data:image/png;base64,iVBORw0KGgo=)",
+            "![alt][ref]",
+        ] {
+            assert!(contains_embedded_image(embed), "missed embed: {embed:?}");
+        }
+    }
+
+    /// A false positive costs a one-minute deletion window, so the matcher is
+    /// allowed to be broad -- but not so broad it fires on ordinary prose,
+    /// links, or code.
+    #[test]
+    fn ordinary_text_is_not_an_embedded_image() {
+        for benign in [
+            "wow! [this link](https://example.com) is good",
+            "the array is a![0] in that language",
+            "no images here at all",
+            "shout! [bracketed aside] then more",
+            "vec![1, 2, 3] is a Rust macro",
+        ] {
+            assert!(
+                !contains_embedded_image(benign),
+                "false positive on {benign:?}"
+            );
+        }
     }
 
     #[test]

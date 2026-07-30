@@ -17,6 +17,8 @@ const PENDING_LOW_SEVERITY: TableDefinition<&str, &[u8]> =
     TableDefinition::new("pending_low_severity_v1");
 const ACTION_LIMITS: TableDefinition<&str, &[u8]> = TableDefinition::new("action_limits_v1");
 const REPORT_OUTCOMES: TableDefinition<&str, &[u8]> = TableDefinition::new("report_outcomes_v1");
+const PENDING_TIMESTAMP: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("pending_timestamp_v1");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EventDisposition {
@@ -101,6 +103,49 @@ pub struct PendingLowSeverity {
     pub outcome: Option<LowSeverityOutcome>,
 }
 
+/// A future-dated message awaiting its author's deletion.
+///
+/// River orders and prunes by the SENDER-SUPPLIED timestamp, so a message dated
+/// ahead sits at the bottom of the room permanently and is the last thing
+/// evicted while legitimate messages roll off. Only the author may delete it,
+/// so the moderator can do nothing but ask, wait, and then remove the account.
+/// Why a message is awaiting its author's deletion. Both offences share one
+/// mechanism: only the author can delete, so the moderator can ask, wait, then
+/// remove the account.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SelfDeleteReason {
+    /// Dated ahead, so it pins itself to the bottom of the room forever.
+    FutureTimestamp,
+    /// Embeds an image. River renders GFM markdown, so `![](...)` becomes a
+    /// live `<img>`; until that is properly bounded a malicious embed can put
+    /// arbitrary picture content in front of everyone in the room.
+    EmbeddedImage,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PendingTimestampEnforcement {
+    /// Defaults to the future-timestamp case so records written before image
+    /// enforcement existed still deserialize.
+    #[serde(default = "default_self_delete_reason")]
+    pub reason: SelfDeleteReason,
+    pub room_owner: String,
+    pub member_id: String,
+    pub target_message_id: String,
+    pub target_content_hash: String,
+    /// The moderator's own warning, so it can be retracted once the offending
+    /// message is gone. `None` when riverctl predates 0.2.8 and did not return
+    /// the ID; the warning then simply stays.
+    pub warning_message_id: Option<String>,
+    pub claimed_skew_seconds: i64,
+    pub warned_at: DateTime<Utc>,
+    pub enforce_after: DateTime<Utc>,
+}
+
+fn default_self_delete_reason() -> SelfDeleteReason {
+    SelfDeleteReason::FutureTimestamp
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct ActionLimitRecord {
     last_action_at: DateTime<Utc>,
@@ -134,6 +179,7 @@ impl ModerationState {
         write.open_table(PENDING_LOW_SEVERITY)?;
         write.open_table(ACTION_LIMITS)?;
         write.open_table(REPORT_OUTCOMES)?;
+        write.open_table(PENDING_TIMESTAMP)?;
         write.commit()?;
         Ok(Self { database })
     }
@@ -417,6 +463,58 @@ impl ModerationState {
         drop(table);
         write.commit()?;
         Ok(prior)
+    }
+
+    /// Queue a future-dated message for enforcement. Idempotent per message, so
+    /// a redelivery or restart cannot stack two deadlines on one offence.
+    pub fn schedule_timestamp_enforcement(
+        &self,
+        pending: &PendingTimestampEnforcement,
+    ) -> Result<bool> {
+        let key = event_key(&pending.room_owner, &pending.target_message_id);
+        let write = self.database.begin_write()?;
+        let mut table = write.open_table(PENDING_TIMESTAMP)?;
+        if table.get(key.as_str())?.is_some() {
+            drop(table);
+            write.commit()?;
+            return Ok(false);
+        }
+        let encoded = serde_json::to_vec(pending)?;
+        table.insert(key.as_str(), encoded.as_slice())?;
+        drop(table);
+        write.commit()?;
+        Ok(true)
+    }
+
+    pub fn due_timestamp_enforcements(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<PendingTimestampEnforcement>> {
+        let read = self.database.begin_read()?;
+        let table = read.open_table(PENDING_TIMESTAMP)?;
+        let mut due = Vec::new();
+        for entry in table.iter()? {
+            let (_, value) = entry?;
+            let pending: PendingTimestampEnforcement = serde_json::from_slice(value.value())?;
+            if pending.enforce_after <= now {
+                due.push(pending);
+            }
+        }
+        Ok(due)
+    }
+
+    pub fn clear_timestamp_enforcement(
+        &self,
+        room_owner: &str,
+        target_message_id: &str,
+    ) -> Result<()> {
+        let key = event_key(room_owner, target_message_id);
+        let write = self.database.begin_write()?;
+        let mut table = write.open_table(PENDING_TIMESTAMP)?;
+        table.remove(key.as_str())?;
+        drop(table);
+        write.commit()?;
+        Ok(())
     }
 
     pub fn record_warning(&self, warning: &WarningRecord) -> Result<()> {
@@ -860,6 +958,43 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn timestamp_enforcement_is_idempotent_and_deadline_gated() {
+        let dir = tempdir().unwrap();
+        let state = ModerationState::open(&dir.path().join("state.redb")).unwrap();
+        let pending = PendingTimestampEnforcement {
+            reason: SelfDeleteReason::FutureTimestamp,
+            room_owner: "room".into(),
+            member_id: "member".into(),
+            target_message_id: "msg".into(),
+            target_content_hash: "hash".into(),
+            warning_message_id: Some("warning-1".into()),
+            claimed_skew_seconds: 3637,
+            warned_at: at(0),
+            enforce_after: at(0) + Duration::seconds(120),
+        };
+
+        assert!(state.schedule_timestamp_enforcement(&pending).unwrap());
+        // A redelivery or restart must not stack a second deadline on one offence.
+        assert!(!state.schedule_timestamp_enforcement(&pending).unwrap());
+
+        assert!(state
+            .due_timestamp_enforcements(at(0) + Duration::seconds(119))
+            .unwrap()
+            .is_empty());
+        let due = state
+            .due_timestamp_enforcements(at(0) + Duration::seconds(121))
+            .unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].warning_message_id.as_deref(), Some("warning-1"));
+
+        state.clear_timestamp_enforcement("room", "msg").unwrap();
+        assert!(state
+            .due_timestamp_enforcements(at(0) + Duration::seconds(600))
+            .unwrap()
+            .is_empty());
     }
 
     fn message(id: &str, content: &str, observed: DateTime<Utc>) -> VerifiedMessage {
