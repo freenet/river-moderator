@@ -2,6 +2,7 @@ pub mod audit;
 pub mod budget;
 pub mod classifier;
 pub mod config;
+pub mod emoji;
 pub mod event;
 pub mod local_model;
 pub mod membership;
