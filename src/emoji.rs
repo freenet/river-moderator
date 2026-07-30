@@ -42,8 +42,9 @@ fn is_emoji_component(c: char) -> bool {
 fn is_emoji_base(c: char) -> bool {
     matches!(c,
         '\u{1F300}'..='\u{1FAFF}'       // pictographs, supplemental, extended-A
-        | '\u{1F000}'..='\u{1F2FF}'     // mahjong/domino/cards, enclosed
-        | '\u{1F1E6}'..='\u{1F1FF}'     // regional indicators (flags)
+        // Covers mahjong/domino/cards, enclosed alphanumerics, AND the
+        // regional indicators U+1F1E6-1F1FF that make up flags.
+        | '\u{1F000}'..='\u{1F2FF}'
         | '\u{2600}'..='\u{27BF}'       // misc symbols + dingbats
         | '\u{2B00}'..='\u{2BFF}'       // misc symbols and arrows
         | '\u{2190}'..='\u{21FF}'       // arrows
