@@ -349,6 +349,42 @@ impl ModerationState {
         Ok(count)
     }
 
+    /// Count prior observations WITHOUT recording one.
+    ///
+    /// A recorded observation is a deferred action: `policy::decide` turns a
+    /// later first-offence nudge into a formal warning once the count is above
+    /// zero, and a formal warning makes the one after that a ban. So recording
+    /// on a classification that never produced an action silently raises the
+    /// penalty on the member's next real infraction.
+    ///
+    /// That mattered on 2026-07-30, when two members were marked by verdicts
+    /// that replayed as `allow` 3/3 against the identical payload. Reading the
+    /// count here lets the caller decide first and record only what survives
+    /// confirmation.
+    pub fn policy_observation_count(
+        &self,
+        policy_version: &str,
+        room_owner: &str,
+        member_id: &str,
+        category: Category,
+        now: DateTime<Utc>,
+        window: Duration,
+    ) -> Result<u32> {
+        let key = observation_key(policy_version, room_owner, member_id, category);
+        let read = self.database.begin_read()?;
+        let table = read.open_table(OBSERVATIONS)?;
+        let Some(entry) = table.get(key.as_str())? else {
+            return Ok(0);
+        };
+        let history: ObservationHistory = serde_json::from_slice(entry.value())?;
+        let live = history
+            .times
+            .iter()
+            .filter(|time| **time >= now - window && **time <= now)
+            .count();
+        Ok(live.try_into().unwrap_or(u32::MAX))
+    }
+
     pub fn record_policy_observation(
         &self,
         policy_version: &str,
@@ -745,6 +781,85 @@ mod tests {
 
     fn at(second: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 7, 25, 12, 0, second).unwrap()
+    }
+
+    /// Counting must not be a write. A recorded observation escalates the
+    /// member's NEXT nudge into a formal warning, so a classification the system
+    /// declined to act on must leave no mark. On 2026-07-30 two members were
+    /// marked by verdicts that replayed as `allow` 3/3.
+    #[test]
+    fn counting_observations_does_not_record_one() {
+        let dir = tempdir().unwrap();
+        let state = ModerationState::open(&dir.path().join("state.redb")).unwrap();
+        let window = Duration::hours(24);
+
+        for _ in 0..5 {
+            let seen = state
+                .policy_observation_count("v1", "room", "member", Category::OffTopic, at(0), window)
+                .unwrap();
+            assert_eq!(seen, 0, "counting must never accumulate");
+        }
+
+        // The explicit write is what moves the count, and it still reports the
+        // count as it stood BEFORE this observation.
+        let prior = state
+            .record_policy_observation("v1", "room", "member", Category::OffTopic, at(1), window)
+            .unwrap();
+        assert_eq!(prior, 0);
+        assert_eq!(
+            state
+                .policy_observation_count("v1", "room", "member", Category::OffTopic, at(2), window)
+                .unwrap(),
+            1
+        );
+
+        // Categories are tracked separately, so an off-topic mark must not
+        // escalate an unrelated incivility finding.
+        assert_eq!(
+            state
+                .policy_observation_count(
+                    "v1",
+                    "room",
+                    "member",
+                    Category::Incivility,
+                    at(2),
+                    window
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    /// Observations outside the window are not counted, so a mark cannot
+    /// escalate a member indefinitely.
+    #[test]
+    fn observation_count_ignores_entries_outside_the_window() {
+        let dir = tempdir().unwrap();
+        let state = ModerationState::open(&dir.path().join("state.redb")).unwrap();
+        state
+            .record_policy_observation(
+                "v1",
+                "room",
+                "member",
+                Category::OffTopic,
+                at(0),
+                Duration::hours(24),
+            )
+            .unwrap();
+        let long_after = at(0) + Duration::hours(48);
+        assert_eq!(
+            state
+                .policy_observation_count(
+                    "v1",
+                    "room",
+                    "member",
+                    Category::OffTopic,
+                    long_after,
+                    Duration::hours(24)
+                )
+                .unwrap(),
+            0
+        );
     }
 
     fn message(id: &str, content: &str, observed: DateTime<Utc>) -> VerifiedMessage {
