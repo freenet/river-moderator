@@ -353,7 +353,7 @@ pub struct LimitConfig {
 }
 
 fn default_future_timestamp_seconds() -> i64 {
-    300
+    60
 }
 
 fn default_future_timestamp_grace_seconds() -> u64 {
@@ -371,9 +371,14 @@ pub struct PolicyConfig {
     /// message is treated as pinning itself to the bottom of the room.
     ///
     /// Measured against 2523 production messages: 97.7% land within +/-1 minute
-    /// and the 99th percentile is +5 SECONDS, so 5 minutes clears ordinary clock
-    /// drift by two orders of magnitude. Every real offender in that sample was
-    /// an hour or more ahead.
+    /// and the 99th percentile is +5 SECONDS, so 60s is still an order of
+    /// magnitude beyond normal drift.
+    ///
+    /// Set to 60 rather than a looser bound because the damage does not depend
+    /// on intent: any future dating pushes the message out of order in the UI,
+    /// and an accidental one is just as disruptive to read past as a deliberate
+    /// one. In the sample this catches one extra author (61s, 61s, 67s ahead)
+    /// alongside the three that were an hour or more out.
     #[serde(default = "default_future_timestamp_seconds")]
     pub future_timestamp_seconds: i64,
     /// How long the author has to delete a future-dated message before it is

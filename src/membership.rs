@@ -223,7 +223,7 @@ mod tests {
 
     fn policy() -> PolicyConfig {
         PolicyConfig {
-            future_timestamp_seconds: 300,
+            future_timestamp_seconds: 60,
             future_timestamp_grace_seconds: 120,
             embedded_image_grace_seconds: 60,
             warning_window_hours: 24,
