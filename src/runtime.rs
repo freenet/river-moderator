@@ -543,6 +543,39 @@ async fn process_message(
     // `schedule_warning_if_eligible` already ignores any action that is not a
     // nudge or a formal warning, so widening the mode test cannot introduce a
     // public action that policy did not ask for.
+    //
+    // A public reply must never rest on a single sample. The classifier is
+    // stochastic, and on 2026-07-30 one unlucky sample called an on-topic chess
+    // remark ("my queen shouldnt be here lol", amid talk of implementing
+    // castling) a sexualized off-topic tangent at 97% confidence and nudged a
+    // blameless member in public. Replaying the exact captured payload against
+    // the exact same prompt returned `allow` three times out of three, so it was
+    // sampling noise, not something a prompt edit could fix.
+    //
+    // Severe-harm bans already require an independent second pass before acting.
+    // Low-severity actions are also public and also irreversible in the only way
+    // that matters (everyone saw it), so they get the same treatment. The cost is
+    // bounded: the second call happens only when a public action is actually
+    // projected, which the global interval and per-member cooldown make rare.
+    let projected_action = if matches!(
+        projected_action,
+        crate::policy::PolicyAction::NudgeAsModerator
+            | crate::policy::PolicyAction::WarnAsModerator
+    ) && matches!(config.service.mode, Mode::Warn | Mode::Enforce)
+    {
+        confirm_low_severity_action(
+            &config,
+            &budgets,
+            &model,
+            &message,
+            &payload,
+            projected_action,
+            classifier.classification.category,
+        )
+        .await?
+    } else {
+        projected_action
+    };
     if matches!(config.service.mode, Mode::Warn | Mode::Enforce) {
         schedule_warning_if_eligible(
             &config,
@@ -960,6 +993,74 @@ async fn warning_loop(config: Arc<Config>, state: Arc<ModerationState>) {
             }
         }
     }
+}
+
+/// Take an independent second sample before any public low-severity reply, and
+/// drop the action unless that sample independently agrees the message is not
+/// allowable.
+///
+/// This mirrors the severe-harm verifier. It exists because the first sample is
+/// a draw from a distribution, not a measurement: a single 97%-confidence
+/// `off_topic` finding against an on-topic chess remark reached the room on
+/// 2026-07-30, and replaying that exact payload against that exact prompt
+/// returned `allow` 3/3. Confidence does not express sampling stability, so no
+/// threshold on it would have caught that; only a second draw does.
+///
+/// Deliberately asymmetric. Disagreement always cancels the action and never
+/// creates or escalates one, so the worst case is a missed nudge rather than an
+/// unearned public reprimand. Budget refusal cancels too, on the same principle.
+async fn confirm_low_severity_action(
+    config: &Config,
+    budgets: &BudgetLedger,
+    model: &OpenAiModelClient,
+    message: &VerifiedMessage,
+    payload: &[u8],
+    projected_action: crate::policy::PolicyAction,
+    category: Category,
+) -> Result<crate::policy::PolicyAction> {
+    let confirm_request_id = request_id("low-severity-confirm", message);
+    if reserve(
+        config,
+        budgets,
+        &confirm_request_id,
+        &message.author_id,
+        payload.len(),
+        ModelRole::Classifier,
+    )
+    .is_err()
+    {
+        tracing::warn!(
+            member_id = %message.author_id,
+            ?projected_action,
+            "public action cancelled: no budget for the confirming sample"
+        );
+        return Ok(crate::policy::PolicyAction::None);
+    }
+    let confirmation = model
+        .classify(payload, ModelPass::Classifier, &message.author_id)
+        .await?;
+    let _ = reconcile(
+        config,
+        budgets,
+        &confirm_request_id,
+        &confirmation,
+        ModelRole::Classifier,
+    );
+    let agrees = confirmation.classification.verdict != Verdict::Allow
+        && confirmation.classification.category == category;
+    if agrees {
+        return Ok(projected_action);
+    }
+    tracing::warn!(
+        member_id = %message.author_id,
+        message_hash = %short_hash(&message.content_hash()),
+        first_category = ?category,
+        second_verdict = ?confirmation.classification.verdict,
+        second_category = ?confirmation.classification.category,
+        ?projected_action,
+        "public action cancelled: independent second sample disagreed"
+    );
+    Ok(crate::policy::PolicyAction::None)
 }
 
 /// Tenure screening is the lowest-priority consumer of the model budget. It is

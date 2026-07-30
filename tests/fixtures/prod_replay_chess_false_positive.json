@@ -1,0 +1,186 @@
+[
+  {
+    "name": "prod_chess_queen_false_positive",
+    "payload": {
+      "policy_version": "river-moderator-policy-v6",
+      "join_name_candidate": false,
+      "room_topic": "Freenet, River, decentralized systems, and closely related project work",
+      "policy_summary": {
+        "be_civil": true,
+        "stay_on_topic": true,
+        "severe_harm_immediate_ban": true,
+        "disruptive_behavior_warning_then_ban": true
+      },
+      "target_tenure": {
+        "trust_tier": "probationary",
+        "first_observed_at": "2026-07-30T02:14:11.849468970Z",
+        "observation_count": 2,
+        "active_days": 1,
+        "bootstrapped_as_existing": false,
+        "is_current_deputy": false
+      },
+      "active_warning": null,
+      "derived_signals": {
+        "author_messages_10_seconds": 1,
+        "author_messages_1_minute": 2,
+        "author_messages_5_minutes": 2,
+        "milliseconds_since_author_previous": 50461,
+        "exact_duplicate_count_5_minutes": 0,
+        "claimed_clock_skew_seconds": -10
+      },
+      "untrusted_data": {
+        "target_message": {
+          "speaker": "target",
+          "nickname": "Goose",
+          "message_id_alias": "m921",
+          "content": "my queen shouldnt be here lol",
+          "author_claimed_at": "2026-07-30T02:14:51.573Z",
+          "first_observed_at": "2026-07-30T02:15:02.311204293Z",
+          "edited": false,
+          "is_moderator": false,
+          "reply_to_moderator": false
+        },
+        "context": [
+          {
+            "speaker": "speaker_1",
+            "nickname": "Ian Clarke",
+            "message_id_alias": "m5692",
+            "content": "It's similar to email, but it's still in development - it probably won't work",
+            "author_claimed_at": "2026-07-30T02:07:05.899Z",
+            "first_observed_at": "2026-07-30T02:07:13.353618620Z",
+            "edited": false,
+            "is_moderator": true,
+            "reply_to_moderator": false
+          },
+          {
+            "speaker": "speaker_1",
+            "nickname": "Ian Clarke",
+            "message_id_alias": "m1953",
+            "content": "When are you moving it here? ;P",
+            "author_claimed_at": "2026-07-30T02:07:51.467Z",
+            "first_observed_at": "2026-07-30T02:07:58.885895793Z",
+            "edited": false,
+            "is_moderator": true,
+            "reply_to_moderator": false
+          },
+          {
+            "speaker": "speaker_2",
+            "nickname": "Nova Nexus",
+            "message_id_alias": "m8464",
+            "content": "joined the room",
+            "author_claimed_at": "2026-07-30T02:08:34.393Z",
+            "first_observed_at": "2026-07-30T02:08:45.022199560Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false
+          },
+          {
+            "speaker": "speaker_3",
+            "nickname": "Umbra Almanac",
+            "message_id_alias": "m1095",
+            "content": "joined the room",
+            "author_claimed_at": "2026-07-30T02:08:38.814Z",
+            "first_observed_at": "2026-07-30T02:09:12.182829556Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false
+          },
+          {
+            "speaker": "speaker_4",
+            "nickname": "Cinder Jaguar",
+            "message_id_alias": "m6946",
+            "content": "Yeah I just wasnt clear on whether or not it was literally SMTP or 'emulating' that experience and then acts as its own gateway to get out to non freenet servers",
+            "author_claimed_at": "2026-07-30T02:09:37.740Z",
+            "first_observed_at": "2026-07-30T02:09:50.582320322Z",
+            "edited": true,
+            "is_moderator": false,
+            "reply_to_moderator": false
+          },
+          {
+            "speaker": "speaker_5",
+            "nickname": "Pulsar Bulwark",
+            "message_id_alias": "m8893",
+            "content": "joined the room",
+            "author_claimed_at": "2026-07-30T02:09:41.370Z",
+            "first_observed_at": "2026-07-30T02:09:50.582387708Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false
+          },
+          {
+            "speaker": "speaker_6",
+            "nickname": "Astral Terminal",
+            "message_id_alias": "m658",
+            "content": "joined the room",
+            "author_claimed_at": "2026-07-30T02:09:37.584Z",
+            "first_observed_at": "2026-07-30T02:09:54.121875737Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false
+          },
+          {
+            "speaker": "speaker_7",
+            "nickname": "Photon Crucible",
+            "message_id_alias": "m186",
+            "content": "What is actually happening when I see 'Unexpected response from node'",
+            "author_claimed_at": "2026-07-30T02:12:05.195Z",
+            "first_observed_at": "2026-07-30T02:12:14.270915716Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false
+          },
+          {
+            "speaker": "speaker_8",
+            "nickname": "Raziel",
+            "message_id_alias": "m9765",
+            "content": "Forgot to implement castling",
+            "author_claimed_at": "2026-07-30T02:13:25.325Z",
+            "first_observed_at": "2026-07-30T02:13:34.055424931Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false
+          },
+          {
+            "speaker": "target",
+            "nickname": "Goose",
+            "message_id_alias": "m408",
+            "content": "but i did it",
+            "author_claimed_at": "2026-07-30T02:13:56.278Z",
+            "first_observed_at": "2026-07-30T02:14:11.849468970Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false
+          },
+          {
+            "speaker": "speaker_8",
+            "nickname": "Raziel",
+            "message_id_alias": "m17",
+            "content": "Forget, castling is working",
+            "author_claimed_at": "2026-07-30T02:14:08.137Z",
+            "first_observed_at": "2026-07-30T02:14:18.007963364Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false
+          },
+          {
+            "speaker": "speaker_8",
+            "nickname": "Raziel",
+            "message_id_alias": "m8974",
+            "content": "Lol",
+            "author_claimed_at": "2026-07-30T02:14:10.287Z",
+            "first_observed_at": "2026-07-30T02:14:20.218180228Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false
+          }
+        ]
+      }
+    },
+    "acceptable_verdicts": [
+      "allow"
+    ],
+    "acceptable_categories": [
+      "none"
+    ]
+  }
+]
