@@ -970,14 +970,26 @@ async fn warning_loop(config: Arc<Config>, state: Arc<ModerationState>) {
 /// for the evidence-backed routing paths.
 const TIER_SCREENING_BUDGET_PERCENT: u64 = 70;
 
+/// Both the daily and the monthly cap must be respected, because they bind on
+/// very different timescales and only the monthly one can strand the service.
+/// The daily cap refills every day, so exhausting it costs at most a few hours
+/// of screening. The monthly cap does not: sustained screening at 70% of the
+/// daily cap would exhaust a monthly cap set to a few days' worth of daily caps
+/// in about a week, and once `reserve()` starts refusing on `MonthlySpend`
+/// nothing is classified at all for the rest of the month, reports included.
+/// Checking only the daily figure would therefore trade a fixed daily pause for
+/// a multi-week outage.
 fn tier_screening_within_budget(budgets: &BudgetLedger, config: &Config) -> Result<bool> {
     let status = budgets.status(Utc::now())?;
-    let ceiling = config
-        .limits
-        .daily_budget_microusd
-        .saturating_mul(TIER_SCREENING_BUDGET_PERCENT)
-        / 100;
-    Ok(status.day_reserved_microusd < ceiling)
+    let within =
+        |spent: u64, cap: u64| spent < cap.saturating_mul(TIER_SCREENING_BUDGET_PERCENT) / 100;
+    Ok(within(
+        status.day_reserved_microusd,
+        config.limits.daily_budget_microusd,
+    ) && within(
+        status.month_reserved_microusd,
+        config.limits.monthly_budget_microusd,
+    ))
 }
 
 fn reserve(
