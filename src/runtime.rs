@@ -237,6 +237,23 @@ async fn process_message(
     } else {
         incoming_context.clone()
     };
+    // The moderator's own automated replies must never become evidence against
+    // the member they were sent to. On 2026-07-30 a nudge ("Let's keep this room
+    // on topic") landed in the context window, and the classifier then justified
+    // the next two verdicts with "Continues unrelated chess discussion AFTER
+    // MODERATOR REDIRECTED ROOM" -- including for a message about C# that had
+    // nothing to do with the original subject. One nudge poisoned every
+    // subsequent message from that member, escalating nudge -> warn -> ban. Only
+    // the 24h per-member cooldown stopped it becoming a ban.
+    //
+    // Service identities are the automated ones (`service_member_ids`), and
+    // their messages are already refused as classification TRIGGERS a few lines
+    // below. Feeding them back as CONTEXT is the same mistake in the other
+    // direction: it lets the moderator manufacture the evidence for its own
+    // escalation. Human moderators are deliberately NOT filtered -- a real
+    // person asking the room to drop a subject is genuine context, and ignoring
+    // a human redirect is exactly the repeat behaviour that should escalate.
+    let context = strip_service_messages(context, &config.room.service_member_ids);
     let signals = temporal_signals(&message, &context);
     let tenure = members.observe(
         &message.room_owner,
@@ -388,10 +405,12 @@ async fn process_message(
 
     let budget_status = budgets.status(Utc::now())?;
 
+    // READ the count here; the write happens further down and only for a
+    // classification that survived confirmation. See `policy_observation_count`.
     let prior_observations = if classifier.classification.category == Category::None {
         0
     } else {
-        state.record_policy_observation(
+        state.policy_observation_count(
             POLICY_VERSION,
             &message.room_owner,
             &message.author_id,
@@ -576,6 +595,33 @@ async fn process_message(
     } else {
         projected_action
     };
+    // Only now, and only for a finding that survived confirmation and produced a
+    // real outcome, does the observation get written. A recorded observation is
+    // a deferred action -- it escalates the member's NEXT nudge into a formal
+    // warning, and the one after that into a ban -- so a classification that the
+    // system itself declined to act on must not leave a mark. `HumanReview` and
+    // `None` deliberately record nothing: the first means the system was unsure,
+    // the second that it decided against acting.
+    if classifier.classification.category != Category::None
+        && matches!(
+            projected_action,
+            crate::policy::PolicyAction::RecordDisruption
+                | crate::policy::PolicyAction::NudgeAsModerator
+                | crate::policy::PolicyAction::WarnAsModerator
+                | crate::policy::PolicyAction::BanAsModerator
+                | crate::policy::PolicyAction::BanAsOwnerPolicyEscalation
+                | crate::policy::PolicyAction::BanAsOwnerEmergency
+        )
+    {
+        state.record_policy_observation(
+            POLICY_VERSION,
+            &message.room_owner,
+            &message.author_id,
+            classifier.classification.category,
+            message.first_observed_at,
+            Duration::hours(config.policy.warning_window_hours as i64),
+        )?;
+    }
     if matches!(config.service.mode, Mode::Warn | Mode::Enforce) {
         schedule_warning_if_eligible(
             &config,
@@ -995,6 +1041,26 @@ async fn warning_loop(config: Arc<Config>, state: Arc<ModerationState>) {
     }
 }
 
+/// Remove the moderator's own automated messages from the classifier context.
+///
+/// Only the automated `service_member_ids` are removed. A human moderator asking
+/// the room to drop a subject is genuine context, and ignoring a human redirect
+/// is exactly the repeat behaviour that SHOULD escalate; the bug is the machine
+/// citing its own output as proof the member is defying it.
+fn strip_service_messages(
+    context: Vec<VerifiedMessage>,
+    service_member_ids: &[String],
+) -> Vec<VerifiedMessage> {
+    context
+        .into_iter()
+        .filter(|candidate| {
+            !service_member_ids
+                .iter()
+                .any(|service| service == &candidate.author_id)
+        })
+        .collect()
+}
+
 /// Take an independent second sample before any public low-severity reply, and
 /// drop the action unless that sample independently agrees the message is not
 /// allowable.
@@ -1399,6 +1465,39 @@ mod tests {
         assert!(contains_explicit_sexual_term(
             "should we add an nsfw filter to the room contract?"
         ));
+    }
+
+    /// 2026-07-30: a nudge the moderator itself had just sent sat in the context
+    /// window, and the classifier justified the next two verdicts with
+    /// "Continues unrelated chess discussion after moderator redirected room" --
+    /// including for a message about C#. One nudge poisoned every later message
+    /// from that member, escalating nudge -> warn -> ban.
+    #[test]
+    fn own_automated_replies_are_stripped_from_context() {
+        let service = vec!["4CLPTJPM".to_string(), "NRKA4WVX".to_string()];
+        let mut nudge = message("Let's keep this room on topic. Back to Freenet.");
+        nudge.author_id = "4CLPTJPM".into();
+        nudge.nickname = "River Marshal".into();
+        let mut human_mod = message("folks, can we drop this thread please");
+        human_mod.author_id = "7XSOGJTK".into();
+        let member = message("a completely open source chess.com alternative");
+
+        let kept = strip_service_messages(vec![nudge, human_mod.clone(), member.clone()], &service);
+
+        let authors: Vec<_> = kept.iter().map(|m| m.author_id.as_str()).collect();
+        assert!(
+            !authors.contains(&"4CLPTJPM"),
+            "the moderator's own reply must not be evidence against the member it targeted"
+        );
+        // A HUMAN moderator's redirect is genuine context and must survive, or
+        // ignoring a real person's request stops being escalatable.
+        assert_eq!(authors, vec!["7XSOGJTK", "member"]);
+    }
+
+    #[test]
+    fn stripping_service_messages_is_a_no_op_without_service_ids() {
+        let m = message("ordinary");
+        assert_eq!(strip_service_messages(vec![m], &[]).len(), 1);
     }
 
     #[test]
