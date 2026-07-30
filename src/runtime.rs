@@ -31,6 +31,8 @@ use crate::{
 
 const MODEL_REQUEST_OVERHEAD_BYTES: u64 = 6_000;
 const HISTORY_MESSAGES: usize = 200;
+const PROTECTED_REPORT_ACKNOWLEDGEMENT: &str =
+    "Spam report received for review. Reply `ban spam` to ban immediately.";
 
 #[derive(Clone)]
 struct RuntimeAudits {
@@ -199,11 +201,13 @@ async fn process_message(
         8,
     )?;
     let is_report = is_spam_report(&incoming_message);
-    let report_target = if is_report {
+    let is_moderator_ban = is_moderator_spam_ban_command(&incoming_message);
+    let review_trigger = (is_report || is_moderator_ban).then_some(&incoming_message);
+    let reply_target = if review_trigger.is_some() {
         let target_id = incoming_message
             .reply_to_message_id
             .as_deref()
-            .expect("spam report requires a reply target");
+            .expect("spam review actions require a reply target");
         let Some(target) = incoming_context
             .iter()
             .find(|candidate| candidate.message_id == target_id)
@@ -212,22 +216,16 @@ async fn process_message(
             tracing::warn!(
                 reporter_id = %incoming_message.author_id,
                 target_message_id = %target_id,
-                "spam report target is outside retained context"
+                "spam review target is outside retained context"
             );
             return Ok(());
         };
-        tracing::info!(
-            reporter_id = %incoming_message.author_id,
-            target_member_id = %target.author_id,
-            target_message_hash = %short_hash(&target.content_hash()),
-            "spam report accepted for moderation review"
-        );
         Some(target)
     } else {
         None
     };
-    let message = report_target.unwrap_or_else(|| incoming_message.clone());
-    let context = if is_report {
+    let message = reply_target.unwrap_or_else(|| incoming_message.clone());
+    let context = if review_trigger.is_some() {
         state.context(
             &message.room_owner,
             &message.message_id,
@@ -249,6 +247,11 @@ async fn process_message(
         .protected_member_ids
         .iter()
         .any(|member| member == &message.author_id);
+    let incoming_is_protected = config
+        .room
+        .protected_member_ids
+        .iter()
+        .any(|member| member == &incoming_message.author_id);
     let is_service = config
         .room
         .service_member_ids
@@ -259,6 +262,71 @@ async fn process_message(
     if is_service {
         tracing::info!(member_id = %message.author_id, "service-authored message ignored");
         return Ok(());
+    }
+
+    if is_moderator_ban {
+        if !is_authorized_moderator_spam_ban(&incoming_message, &config.room.protected_member_ids) {
+            tracing::warn!(
+                reporter_id = %incoming_message.author_id,
+                target_member_id = %message.author_id,
+                "unauthorized moderator spam-ban command ignored"
+            );
+            return Ok(());
+        }
+        let decision = moderator_spam_ban_decision(
+            &config,
+            &message,
+            &incoming_message,
+            context,
+            tenure,
+            is_protected,
+        );
+        audits.decisions.append(
+            &decision,
+            config.audit.max_context_messages,
+            config.audit.max_message_bytes,
+        )?;
+        tracing::error!(
+            decision_id = %decision.decision_id,
+            moderator_member_id = %incoming_message.author_id,
+            target_member_id = %message.author_id,
+            "protected moderator requested guarded spam ban"
+        );
+        if config.service.mode == Mode::Enforce {
+            enforce_severe_ban(&config, &state, &audits.bans, &decision).await?;
+        }
+        return Ok(());
+    }
+
+    if is_report {
+        tracing::info!(
+            reporter_id = %incoming_message.author_id,
+            target_member_id = %message.author_id,
+            target_message_hash = %short_hash(&message.content_hash()),
+            "spam report accepted for moderation review"
+        );
+        if incoming_is_protected && config.service.mode != Mode::Shadow {
+            let river = config.river.clone();
+            let room_owner = incoming_message.room_owner.clone();
+            let report_message_id = incoming_message.message_id.clone();
+            let reporter_id = incoming_message.author_id.clone();
+            tokio::spawn(async move {
+                if let Err(error) = send_fixed_reply(
+                    &river,
+                    &room_owner,
+                    &report_message_id,
+                    PROTECTED_REPORT_ACKNOWLEDGEMENT,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        reporter_id,
+                        error = %format!("{error:#}"),
+                        "failed to acknowledge protected moderator spam report"
+                    );
+                }
+            });
+        }
     }
     if !is_routine_join_notice(&message)
         && !is_high_signal_message(&message, &signals)
@@ -326,7 +394,7 @@ async fn process_message(
         },
         payload_limit as usize,
     )?;
-    let classifier_request_id = request_id("classifier", &message);
+    let classifier_request_id = request_id("classifier", &message, review_trigger);
     let classifier_reservation = reserve(
         &config,
         &budgets,
@@ -350,7 +418,7 @@ async fn process_message(
 
     let (verifier, verifier_latency_ms, verifier_cost_microusd) =
         if classifier.classification.verdict == Verdict::BanSevereHarm {
-            let verifier_request_id = request_id("verifier", &message);
+            let verifier_request_id = request_id("verifier", &message, review_trigger);
             let _reservation = reserve(
                 &config,
                 &budgets,
@@ -414,12 +482,7 @@ async fn process_message(
         },
         &config.policy,
     );
-    let decision_id = short_hash(&format!(
-        "{}:{}:{}",
-        message.room_owner,
-        message.message_id,
-        message.content_hash()
-    ));
+    let decision_id = decision_id(&message, review_trigger);
     let record = DecisionAuditRecord {
         schema_version: DECISION_AUDIT_SCHEMA_VERSION,
         decision_id: decision_id.clone(),
@@ -427,6 +490,7 @@ async fn process_message(
         mode: config.service.mode,
         room_owner: message.room_owner.clone(),
         trigger: message.clone(),
+        review_trigger: review_trigger.cloned(),
         context,
         temporal_signals: signals,
         tenure,
@@ -435,6 +499,10 @@ async fn process_message(
         verifier_model: verifier
             .as_ref()
             .map(|_| config.model.verifier_name.clone()),
+        classifier_request_id: classifier_request_id.clone(),
+        verifier_request_id: verifier
+            .as_ref()
+            .map(|_| request_id("verifier", &message, review_trigger)),
         classifier: classifier.classification.clone(),
         verifier: verifier
             .as_ref()
@@ -589,6 +657,29 @@ async fn enforce_severe_ban(
         return Ok(());
     }
 
+    if let Some(review_trigger) = &decision.review_trigger {
+        if !state.message_is_current(
+            &decision.room_owner,
+            &review_trigger.message_id,
+            &review_trigger.author_id,
+            &review_trigger.content_hash(),
+        )? {
+            let record = ban_record(decision, AuditOutcome::RefusedChangedOrDeletedMessage, None);
+            audit.append_ban(
+                &record,
+                config.audit.max_context_messages,
+                config.audit.max_message_bytes,
+            )?;
+            tracing::warn!(
+                decision_id = %decision.decision_id,
+                member_id,
+                review_trigger_message_id = %review_trigger.message_id,
+                "automatic ban refused because its report or moderator command changed or was deleted"
+            );
+            return Ok(());
+        }
+    }
+
     let pending = PendingBan {
         room_owner: decision.room_owner.clone(),
         member_id: member_id.clone(),
@@ -701,12 +792,9 @@ fn ban_record(
                     .unwrap_or("missing-verifier")
             ),
             prompt_version: POLICY_VERSION.into(),
-            classifier_request_id: request_id("classifier", &decision.trigger),
+            classifier_request_id: decision.classifier_request_id.clone(),
             classifier: decision.classifier.clone(),
-            verifier_request_id: decision
-                .verifier
-                .as_ref()
-                .map(|_| request_id("verifier", &decision.trigger)),
+            verifier_request_id: decision.verifier_request_id.clone(),
             verifier: decision.verifier.clone(),
             reserved_microusd: decision
                 .classifier_cost_microusd
@@ -763,12 +851,15 @@ fn report_abuse_decision(
         mode: config.service.mode,
         room_owner: message.room_owner.clone(),
         trigger: message.clone(),
+        review_trigger: None,
         context,
         temporal_signals: temporal_signals(message, &[]),
         tenure,
         trust_tier,
         classifier_model: "report-abuse-guard".into(),
         verifier_model: None,
+        classifier_request_id: request_id("report-abuse-guard", message, None),
+        verifier_request_id: None,
         classifier: classification,
         verifier: None,
         classifier_prompt_tokens: 0,
@@ -783,6 +874,57 @@ fn report_abuse_decision(
         month_cost_microusd: 0,
         projected_action: crate::policy::PolicyAction::BanAsModerator,
         classified_content_hash: message.content_hash(),
+    }
+}
+
+fn moderator_spam_ban_decision(
+    config: &Config,
+    target: &VerifiedMessage,
+    command: &VerifiedMessage,
+    context: Vec<VerifiedMessage>,
+    tenure: crate::membership::MemberTenure,
+    target_is_protected: bool,
+) -> DecisionAuditRecord {
+    let trust_tier = tenure.trust_tier(
+        target.first_observed_at,
+        target_is_protected,
+        &config.policy,
+    );
+    DecisionAuditRecord {
+        schema_version: DECISION_AUDIT_SCHEMA_VERSION,
+        decision_id: decision_id(target, Some(command)),
+        recorded_at: Utc::now(),
+        mode: config.service.mode,
+        room_owner: target.room_owner.clone(),
+        trigger: target.clone(),
+        review_trigger: Some(command.clone()),
+        context,
+        temporal_signals: temporal_signals(target, &[]),
+        tenure,
+        trust_tier,
+        classifier_model: "protected-moderator-command".into(),
+        verifier_model: None,
+        classifier_request_id: request_id("protected-moderator-command", target, Some(command)),
+        verifier_request_id: None,
+        classifier: crate::verdict::Classification {
+            verdict: Verdict::BanSevereHarm,
+            category: Category::Spam,
+            confidence_millionths: 1_000_000,
+            reason: "Explicit spam ban command from a configured protected moderator.".into(),
+        },
+        verifier: None,
+        classifier_prompt_tokens: 0,
+        classifier_completion_tokens: 0,
+        classifier_cost_microusd: 0,
+        verifier_prompt_tokens: None,
+        verifier_completion_tokens: None,
+        verifier_cost_microusd: None,
+        classifier_latency_ms: 0,
+        verifier_latency_ms: None,
+        day_cost_microusd: 0,
+        month_cost_microusd: 0,
+        projected_action: crate::policy::PolicyAction::BanAsModerator,
+        classified_content_hash: target.content_hash(),
     }
 }
 
@@ -982,13 +1124,46 @@ fn reconcile(
     Ok(actual)
 }
 
-fn request_id(pass: &str, message: &VerifiedMessage) -> String {
-    short_hash(&format!(
-        "{pass}:{}:{}:{}",
-        message.room_owner,
-        message.message_id,
-        message.content_hash()
-    ))
+fn request_id(
+    pass: &str,
+    target: &VerifiedMessage,
+    review_trigger: Option<&VerifiedMessage>,
+) -> String {
+    match review_trigger {
+        Some(trigger) => short_hash(&format!(
+            "{pass}:review:{}:{}:{}:{}:{}",
+            target.room_owner,
+            target.message_id,
+            target.content_hash(),
+            trigger.message_id,
+            trigger.content_hash()
+        )),
+        None => short_hash(&format!(
+            "{pass}:{}:{}:{}",
+            target.room_owner,
+            target.message_id,
+            target.content_hash()
+        )),
+    }
+}
+
+fn decision_id(target: &VerifiedMessage, review_trigger: Option<&VerifiedMessage>) -> String {
+    match review_trigger {
+        Some(trigger) => short_hash(&format!(
+            "decision:review:{}:{}:{}:{}:{}",
+            target.room_owner,
+            target.message_id,
+            target.content_hash(),
+            trigger.message_id,
+            trigger.content_hash()
+        )),
+        None => short_hash(&format!(
+            "{}:{}:{}",
+            target.room_owner,
+            target.message_id,
+            target.content_hash()
+        )),
+    }
 }
 
 fn short_hash(value: &str) -> String {
@@ -1010,6 +1185,23 @@ fn is_spam_report(message: &VerifiedMessage) -> bool {
     message.reply_to_message_id.is_some()
         && message.reply_to_author_id.is_some()
         && message.content.trim().eq_ignore_ascii_case("spam")
+}
+
+fn is_moderator_spam_ban_command(message: &VerifiedMessage) -> bool {
+    !message.edited
+        && message.reply_to_message_id.is_some()
+        && message.reply_to_author_id.is_some()
+        && message.content.trim().eq_ignore_ascii_case("ban spam")
+}
+
+fn is_authorized_moderator_spam_ban(
+    message: &VerifiedMessage,
+    protected_member_ids: &[String],
+) -> bool {
+    is_moderator_spam_ban_command(message)
+        && protected_member_ids
+            .iter()
+            .any(|member_id| member_id == &message.author_id)
 }
 
 fn is_high_signal_message(
@@ -1095,6 +1287,104 @@ mod tests {
         report.content = "spam".into();
         report.reply_to_author_id = None;
         assert!(!is_spam_report(&report));
+    }
+
+    #[test]
+    fn accepts_only_exact_spam_ban_replies_as_moderator_commands() {
+        let mut command = message(" BAN SPAM ");
+        command.reply_to_message_id = Some("target".into());
+        command.reply_to_author_id = Some("author".into());
+        assert!(is_moderator_spam_ban_command(&command));
+        command.content = "ban spam please".into();
+        assert!(!is_moderator_spam_ban_command(&command));
+        command.content = "ban spam".into();
+        command.reply_to_message_id = None;
+        assert!(!is_moderator_spam_ban_command(&command));
+        command.reply_to_message_id = Some("target".into());
+        command.edited = true;
+        assert!(!is_moderator_spam_ban_command(&command));
+    }
+
+    #[test]
+    fn spam_ban_commands_require_a_configured_protected_identity() {
+        let mut command = message("ban spam");
+        command.author_id = "moderator".into();
+        command.reply_to_message_id = Some("target".into());
+        command.reply_to_author_id = Some("spammer".into());
+
+        assert!(!is_authorized_moderator_spam_ban(&command, &[]));
+        assert!(!is_authorized_moderator_spam_ban(
+            &command,
+            &["someone-else".into()]
+        ));
+        assert!(is_authorized_moderator_spam_ban(
+            &command,
+            &["moderator".into()]
+        ));
+    }
+
+    #[test]
+    fn distinct_reports_get_distinct_ids_without_reclassifying_as_automatic_work() {
+        let mut target = message("repetitive spam");
+        target.message_id = "target".into();
+        target.author_id = "spammer".into();
+
+        let mut first_report = message("spam");
+        first_report.message_id = "report-1".into();
+        first_report.reply_to_message_id = Some(target.message_id.clone());
+        first_report.reply_to_author_id = Some(target.author_id.clone());
+
+        let mut second_report = first_report.clone();
+        second_report.message_id = "report-2".into();
+
+        let automatic = request_id("classifier", &target, None);
+        let first = request_id("classifier", &target, Some(&first_report));
+        let replayed_first = request_id("classifier", &target, Some(&first_report));
+        let second = request_id("classifier", &target, Some(&second_report));
+
+        assert_ne!(automatic, first);
+        assert_ne!(first, second);
+        assert_eq!(first, replayed_first);
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = BudgetLedger::open(&dir.path().join("state.redb")).unwrap();
+        let limits = crate::config::LimitConfig {
+            daily_budget_microusd: 10_000,
+            monthly_budget_microusd: 20_000,
+            requests_per_minute: 10,
+            requests_per_hour: 10,
+            requests_per_day: 10,
+            requests_per_author_hour: 10,
+            queue_depth: 10,
+            concurrency: 1,
+        };
+        let now = target.first_observed_at;
+        ledger
+            .reserve(&automatic, &target.author_id, 1, now, &limits)
+            .unwrap();
+        ledger
+            .reserve(&first, &target.author_id, 1, now, &limits)
+            .unwrap();
+
+        let state = ModerationState::open(&dir.path().join("events.redb")).unwrap();
+        state.record_message(target.clone(), 10, 4096).unwrap();
+        state
+            .record_message(first_report.clone(), 10, 4096)
+            .unwrap();
+        assert_eq!(
+            state
+                .record_message(first_report.clone(), 10, 4096)
+                .unwrap()
+                .0,
+            EventDisposition::Duplicate
+        );
+        assert_ne!(
+            decision_id(&target, None),
+            decision_id(&target, Some(&first_report))
+        );
+        assert_ne!(
+            decision_id(&target, Some(&first_report)),
+            decision_id(&target, Some(&second_report))
+        );
     }
 
     #[test]

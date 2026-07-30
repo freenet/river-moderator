@@ -21,7 +21,7 @@ use crate::{
 };
 
 pub const AUDIT_SCHEMA_VERSION: u32 = 1;
-pub const DECISION_AUDIT_SCHEMA_VERSION: u32 = 1;
+pub const DECISION_AUDIT_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -31,13 +31,19 @@ pub struct DecisionAuditRecord {
     pub recorded_at: DateTime<Utc>,
     pub mode: Mode,
     pub room_owner: String,
+    /// The message whose author/content was classified or acted on.
     pub trigger: VerifiedMessage,
+    /// A verified report or moderator command that caused the target to be
+    /// reconsidered. Automatic routing has no review trigger.
+    pub review_trigger: Option<VerifiedMessage>,
     pub context: Vec<VerifiedMessage>,
     pub temporal_signals: TemporalSignals,
     pub tenure: MemberTenure,
     pub trust_tier: TrustTier,
     pub classifier_model: String,
     pub verifier_model: Option<String>,
+    pub classifier_request_id: String,
+    pub verifier_request_id: Option<String>,
     pub classifier: Classification,
     pub verifier: Option<Classification>,
     pub classifier_prompt_tokens: u64,
@@ -66,9 +72,28 @@ impl DecisionAuditRecord {
         );
         anyhow::ensure!(!self.decision_id.is_empty(), "decision ID is empty");
         anyhow::ensure!(
+            !self.classifier_request_id.is_empty(),
+            "classifier request ID is empty"
+        );
+        anyhow::ensure!(
+            self.verifier.is_some() == self.verifier_request_id.is_some(),
+            "verifier result and request ID presence differ"
+        );
+        anyhow::ensure!(
             self.trigger.author_id == self.tenure.member_id,
             "trigger author and tenure member differ"
         );
+        if let Some(review_trigger) = &self.review_trigger {
+            anyhow::ensure!(
+                review_trigger.room_owner == self.room_owner,
+                "review trigger belongs to another room"
+            );
+            anyhow::ensure!(
+                review_trigger.reply_to_message_id.as_deref()
+                    == Some(self.trigger.message_id.as_str()),
+                "review trigger does not reply to the classified target"
+            );
+        }
         anyhow::ensure!(
             self.trigger.content_hash() == self.classified_content_hash,
             "classified content hash does not match trigger"
@@ -79,6 +104,10 @@ impl DecisionAuditRecord {
         );
         anyhow::ensure!(
             self.trigger.content.len() <= max_message_bytes
+                && self
+                    .review_trigger
+                    .as_ref()
+                    .is_none_or(|message| message.content.len() <= max_message_bytes)
                 && self
                     .context
                     .iter()

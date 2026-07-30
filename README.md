@@ -7,7 +7,8 @@ subscribes to verified River message events, evaluates them, and writes a
 private decision audit. Public replies are fixed, source-defined text posted by
 an ordinary River member identity. In enforcement mode, automatic bans are
 limited to severe-harm decisions independently confirmed by both models, or a
-comparable severe repeat after a warning.
+comparable severe repeat after a warning. A separate, exact protected-moderator
+command can request a guarded human-initiated ban without model review.
 
 The initial policy is designed for a highly moderated project room:
 
@@ -74,6 +75,14 @@ applies persistent per-minute, hourly, and daily ban caps. Ban operations are
 fixed CLI calls signed by the configured room-owner credential; untrusted model
 text is never interpreted as a command or command argument.
 
+A configured protected moderator can send a new, unedited reply containing
+exactly `ban spam` to a target message to request an immediate spam ban. The
+command is authorized from the verified River author ID, never a nickname or
+reply preview, and still uses the same changed-message, protected-target,
+contract-key, exact-member, no-descendants, no-deputy, persistent-claim, and
+ban-rate-limit checks as an automatic ban. Shadow and warning modes audit the
+command without banning.
+
 Join notices receive a separate high-confidence nickname prefilter before the
 member's first message. It normalizes Unicode, strips zero-width characters,
 checks severe-name and protected-identity patterns, and sends only candidates
@@ -81,8 +90,13 @@ to the classifier and independent verifier. The pattern match never bans by
 itself; ambiguous names remain log-only.
 
 For high-volume rooms, ordinary messages are recorded without a provider call.
-An exact `spam` reply to a message routes that target plus bounded surrounding
-context and timestamps to the classifier/verifier. Deterministic high-signal
+An exact `spam` reply to a message requests review; it does not itself request a
+ban. The service routes that target plus bounded surrounding context and
+timestamps to the classifier/verifier. Each distinct report has its own
+persistent model-request and decision IDs, while a replay of the same report is
+ignored by the verified-event deduplicator. In warning and enforcement modes,
+reports from configured protected moderators receive a fixed acknowledgement
+that also points to the explicit `ban spam` command. Deterministic high-signal
 events such as extreme bursts, duplicate floods, oversized ASCII walls, and
 common unsolicited-contact lures also trigger review. Five reports from one
 member within sixty seconds are treated as report flooding and enter the same

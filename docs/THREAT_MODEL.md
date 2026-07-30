@@ -24,6 +24,7 @@ The design assumes an attacker knows the complete source code, prompts, model na
 
 - Message content, nicknames, claimed timestamps, links, edits, and quoted text are hostile input.
 - A cryptographically verified River author identity and message ID may be trusted only after verification by River code.
+- A new, unedited, exact `ban spam` reply is authoritative only when that verified author ID is in the root-owned protected-member configuration. Nicknames, display text, and reply previews grant no authority.
 - A message's author-supplied timestamp is not a rate-limit clock. It can be in the past or future.
 - The first local observation time is the rate-limit clock and must be persisted so reconnects and restarts cannot reset it.
 - Model output is untrusted data. It never selects a target, supplies warning text, names a River operation, or becomes a command.
@@ -103,7 +104,7 @@ The trusted action path:
 7. uses fixed, operator-reviewed warning text; and
 8. records an idempotency key before submitting an action.
 
-Before any ban submission, the service durably appends a structured pending-decision record. It stores the target's canonical River `MemberId` plus the full Ed25519 verifying key from fresh membership state, and includes the trigger and bounded context, claimed and observed timestamps, temporal signals, normalized and model reasons, warning history, model/prompt versions, usage and reserved cost, inviter and ancestor IDs, the full descendant removal set, and the content hash that was classified. A second record captures the River submission outcome. This supports later correlation with invite-issuance logs by canonical member ID or verifying key.
+Before any ban submission, the service durably appends a structured pending-decision record. It stores the target's canonical River `MemberId` plus the full Ed25519 verifying key from fresh membership state, and includes the target trigger, any verified report or protected-moderator command that caused review, bounded context, claimed and observed timestamps, temporal signals, normalized and model reasons, warning history, model/prompt versions, exact request IDs, usage and reserved cost, inviter and ancestor IDs, the full descendant removal set, and the content hash that was classified. A second record captures the River submission outcome. This supports later correlation with invite-issuance logs by canonical member ID or verifying key.
 
 Raw audit context is stored in a mode-0600 local audit file with bounded size and retention. Ordinary service logs contain member IDs, content hashes, categories, and outcomes but no complete message bodies.
 
@@ -125,6 +126,7 @@ River bans remove the target and their transitive invite descendants. Automatic 
 - Model reasons are for audit only and are never displayed verbatim or executed.
 - Rapid edits are debounced. Enforcement uses the content hash that was actually classified and aborts if the current message changed.
 - Replayed events and reconnect duplicates are suppressed with persistent message-ID and content-hash state.
+- Automatic review IDs are target-scoped. User-report review IDs include both the verified report and target identities, so a report can reconsider an already classified target without colliding while a replay of that report remains idempotent.
 
 Structured output reduces parser ambiguity; it does not make prompt injection impossible. The trusted enforcement checks remain necessary even if the classifier is replaced by a perfect model.
 
@@ -186,8 +188,11 @@ Hard spending limits convert an unbounded financial attack into a bounded modera
 
 Automatic warnings require gates 1–5 and 7–10 below. Automatic bans additionally
 require gate 6, independent model agreement, a fresh guarded River preflight,
-and persistent ban-rate limits. A separately isolated executor remains a
-recommended hardening step rather than a description of the current process.
+and persistent ban-rate limits. Human-initiated `ban spam` commands bypass model
+review only after exact protected-author and verified-reply checks; they retain
+the same fresh River preflight, protected-target, collateral, idempotency, and
+rate-limit gates. A separately isolated executor remains a recommended hardening
+step rather than a description of the current process.
 
 1. Persistent budget tests cover process restart, concurrent reservation, day/month boundaries, missing usage, provider timeout without retry, price overflow, and state corruption.
 2. Deduplication tests cover reconnects, edits, duplicate content, and pending-ban suppression.

@@ -28,6 +28,8 @@ max_event_bytes = 65536
 [room]
 owner_verifying_key = "REPLACE_WITH_ROOM_OWNER_VERIFYING_KEY"
 topic = "Freenet, River, decentralized systems, and closely related project work"
+# Verified members allowed to issue the exact `ban spam` reply command. These
+# identities are also protected from automatic bans.
 protected_member_ids = []
 protected_nicknames = ["Room Owner", "Invite Bot", "River Marshal", "Moderator"]
 service_member_ids = []
