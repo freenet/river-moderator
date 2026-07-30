@@ -14,7 +14,7 @@ use crate::{
     classifier::{build_payload, PayloadInput, POLICY_VERSION},
     config::{Config, Mode, ModelProvider, ModelRole},
     event::{temporal_signals, VerifiedMessage},
-    membership::MemberRegistry,
+    membership::{MemberRegistry, TrustTier},
     model::{ModelPass, ModelResult},
     name_guard::{self, NameGuardAction},
     openai_model::OpenAiModelClient,
@@ -260,9 +260,19 @@ async fn process_message(
         tracing::info!(member_id = %message.author_id, "service-authored message ignored");
         return Ok(());
     }
+    // The room's norms are safe-for-work and on-topic, and both are broken
+    // almost entirely by members who have not yet earned tenure. Screening their
+    // ordinary messages is the only routing path that catches a first offence
+    // that nobody reports and that trips no deterministic trigger. Established
+    // members and deputies are deliberately exempt, which is what "more tolerant
+    // with established users" means at the routing layer; they are still reached
+    // by high-signal triggers and by an explicit `spam` report.
+    let tier_screened = matches!(trust_tier, TrustTier::Probationary | TrustTier::Regular)
+        && tier_screening_within_budget(&budgets, &config)?;
     if !is_routine_join_notice(&message)
         && !is_high_signal_message(&message, &signals)
         && !is_report
+        && !tier_screened
     {
         tracing::debug!(
             member_id = %message.author_id,
@@ -524,11 +534,16 @@ async fn process_message(
         requests_today = budget_status.requests_today,
         "moderation decision"
     );
-    if config.service.mode == Mode::Warn
-        || (config.service.mode == Mode::Enforce
-            && classifier.classification.verdict == Verdict::BanSevereHarm
-            && projected_action == crate::policy::PolicyAction::WarnAsModerator)
-    {
+    // Enforce mode is a superset of warn mode, so it must still deliver the
+    // public nudge or warning for an ordinary conduct verdict rather than only
+    // for a severe-harm verdict that policy downgraded to a warning. Gating the
+    // low-severity path on `verdict == BanSevereHarm` disabled every conduct
+    // reply in production, because an SFW or on-topic breach classifies as
+    // `NudgeConduct`/`WarnDisruptive` and so never satisfied that condition.
+    // `schedule_warning_if_eligible` already ignores any action that is not a
+    // nudge or a formal warning, so widening the mode test cannot introduce a
+    // public action that policy did not ask for.
+    if matches!(config.service.mode, Mode::Warn | Mode::Enforce) {
         schedule_warning_if_eligible(
             &config,
             &state,
@@ -947,6 +962,24 @@ async fn warning_loop(config: Arc<Config>, state: Arc<ModerationState>) {
     }
 }
 
+/// Tenure screening is the lowest-priority consumer of the model budget. It is
+/// speculative, whereas an explicit report or a deterministic high-signal
+/// trigger is evidence that something is already wrong. A busy day of newcomer
+/// chatter must therefore never exhaust the budget a later report will need, so
+/// screening stops short of the daily cap and the remaining headroom is reserved
+/// for the evidence-backed routing paths.
+const TIER_SCREENING_BUDGET_PERCENT: u64 = 70;
+
+fn tier_screening_within_budget(budgets: &BudgetLedger, config: &Config) -> Result<bool> {
+    let status = budgets.status(Utc::now())?;
+    let ceiling = config
+        .limits
+        .daily_budget_microusd
+        .saturating_mul(TIER_SCREENING_BUDGET_PERCENT)
+        / 100;
+    Ok(status.day_reserved_microusd < ceiling)
+}
+
 fn reserve(
     config: &Config,
     budgets: &BudgetLedger,
@@ -1026,12 +1059,78 @@ fn is_high_signal_message(
                 .count()
                 < message.content.chars().count() / 4)
         || compression_ratio_is_suspicious(&message.content)
+        || contains_explicit_sexual_term(&message.content)
         || {
             let lower = message.content.to_ascii_lowercase();
             ["dm me", "message me", "cash app", "send crypto"]
                 .iter()
                 .any(|needle| lower.contains(needle))
         }
+}
+
+/// Unambiguous explicit terms, matched whole-token.
+const EXPLICIT_SEXUAL_TOKENS: &[&str] = &[
+    "bdsm",
+    "blowjob",
+    "bukkake",
+    "bukake",
+    "buttplug",
+    "cockring",
+    "creampie",
+    "cumshot",
+    "cunt",
+    "deepthroat",
+    "dildo",
+    "fleshlight",
+    "gangbang",
+    "handjob",
+    "hentai",
+    "horny",
+    "milf",
+    "nsfw",
+    "nudes",
+    "onlyfans",
+    "porn",
+    "porno",
+    "pornhub",
+    "sexting",
+    "titties",
+];
+
+/// Explicit multi-word lures, matched as substrings because the individual
+/// words are each innocuous.
+const EXPLICIT_SEXUAL_PHRASES: &[&str] = &[
+    "anal sex",
+    "dick pic",
+    "jack off",
+    "jerk off",
+    "oral sex",
+    "sugar daddy",
+    "talk dirty",
+];
+
+/// The room's norm is safe-for-work, so an unambiguous explicit term routes a
+/// message to the classifier regardless of the author's tenure. This is a
+/// positive routing signal only: it decides whether the model LOOKS at a
+/// message, never what happens to it. The verdict, and the tenure-graduated
+/// tolerance applied to that verdict, remain with the classifier and
+/// `policy::decide`, so a term appearing in genuine technical or moderation
+/// discussion is routed and then allowed rather than acted on.
+///
+/// Single words match whole-token rather than by substring, so ordinary words
+/// that merely contain a shorter term are never routed on this signal. That is
+/// the classic "Scunthorpe" failure and it is pinned by tests.
+fn contains_explicit_sexual_term(content: &str) -> bool {
+    let lower = content.to_lowercase();
+    if EXPLICIT_SEXUAL_PHRASES
+        .iter()
+        .any(|phrase| lower.contains(phrase))
+    {
+        return true;
+    }
+    lower
+        .split(|character: char| !character.is_alphanumeric())
+        .any(|token| EXPLICIT_SEXUAL_TOKENS.contains(&token))
 }
 
 /// Detect pathological repetition cheaply. This is a positive routing signal:
@@ -1070,6 +1169,73 @@ mod tests {
             reply_to_message_id: None,
             reply_to_author_id: None,
         }
+    }
+
+    /// The message that went unmoderated on 2026-07-30. It trips no burst,
+    /// duplicate, size, or compression trigger, so before the SFW term routing
+    /// existed nothing would send it to the classifier at all.
+    #[test]
+    fn routes_the_unmoderated_sfw_breach() {
+        assert!(contains_explicit_sexual_term(
+            "how about a mandatory cockring"
+        ));
+        assert!(contains_explicit_sexual_term("point me to the nsfw room?"));
+        let quiet = crate::event::TemporalSignals {
+            author_messages_10_seconds: 1,
+            author_messages_1_minute: 1,
+            author_messages_5_minutes: 1,
+            milliseconds_since_author_previous: None,
+            exact_duplicate_count_5_minutes: 0,
+            claimed_clock_skew_seconds: 0,
+        };
+        assert!(is_high_signal_message(
+            &message("how about a mandatory cockring"),
+            &quiet
+        ));
+        assert!(!is_high_signal_message(
+            &message("how does River recover after a peer goes offline?"),
+            &quiet
+        ));
+    }
+
+    /// Whole-token matching, so an ordinary word that merely contains a shorter
+    /// term is never routed on this signal. Substring matching would route all
+    /// of these and quietly spend budget on innocuous technical chatter.
+    #[test]
+    fn explicit_term_routing_avoids_scunthorpe_false_positives() {
+        for benign in [
+            "the cockpit display needs a redesign",
+            "assert that the analysis completed",
+            "this class inherits from the base class",
+            "a peacock is not a threat model",
+            "Dick reviewed the pull request",
+            "we should document the assumptions",
+            "titanium alloys are not relevant here",
+        ] {
+            assert!(
+                !contains_explicit_sexual_term(benign),
+                "false positive on {benign:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_term_routing_matches_multiword_lures() {
+        assert!(contains_explicit_sexual_term("wanna talk dirty to me"));
+        assert!(contains_explicit_sexual_term("looking for a Sugar Daddy"));
+        assert!(!contains_explicit_sexual_term(
+            "my dad works on distributed systems"
+        ));
+    }
+
+    /// Routing is not judgement. A term appearing in genuine moderation or
+    /// technical discussion is still sent to the classifier, which is what
+    /// allows it to be allowed rather than silently dropped before review.
+    #[test]
+    fn explicit_term_routing_is_a_signal_not_a_verdict() {
+        assert!(contains_explicit_sexual_term(
+            "should we add an nsfw filter to the room contract?"
+        ));
     }
 
     #[test]
