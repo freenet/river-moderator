@@ -1060,13 +1060,16 @@ fn is_high_signal_message(
                 < message.content.chars().count() / 4)
         || compression_ratio_is_suspicious(&message.content)
         || contains_explicit_sexual_term(&message.content)
-        || {
-            let lower = message.content.to_ascii_lowercase();
-            ["dm me", "message me", "cash app", "send crypto"]
-                .iter()
-                .any(|needle| lower.contains(needle))
-        }
+        || contains_phrase(&message.content, CONTACT_LURE_PHRASES)
 }
+
+/// Unsolicited-contact lures. Matched on word boundaries, not as raw
+/// substrings: `"dm me"` appears inside `"DM me**chanism"`, which routed two
+/// ordinary on-topic messages about River's DM feature to the classifier on
+/// 2026-07-30. Both were correctly allowed, so the only cost was budget and
+/// noise, but the same class of match is why the explicit-term list below is
+/// token-based too.
+const CONTACT_LURE_PHRASES: &[&str] = &["dm me", "message me", "cash app", "send crypto"];
 
 /// Unambiguous explicit terms, matched whole-token.
 const EXPLICIT_SEXUAL_TOKENS: &[&str] = &[
@@ -1121,16 +1124,33 @@ const EXPLICIT_SEXUAL_PHRASES: &[&str] = &[
 /// that merely contain a shorter term are never routed on this signal. That is
 /// the classic "Scunthorpe" failure and it is pinned by tests.
 fn contains_explicit_sexual_term(content: &str) -> bool {
-    let lower = content.to_lowercase();
-    if EXPLICIT_SEXUAL_PHRASES
-        .iter()
-        .any(|phrase| lower.contains(phrase))
-    {
+    if contains_phrase(content, EXPLICIT_SEXUAL_PHRASES) {
         return true;
     }
-    lower
+    content
+        .to_lowercase()
         .split(|character: char| !character.is_alphanumeric())
         .any(|token| EXPLICIT_SEXUAL_TOKENS.contains(&token))
+}
+
+/// Match a multi-word phrase against whole tokens rather than raw bytes.
+///
+/// The content is reduced to its lowercase alphanumeric tokens joined by single
+/// spaces, then compared space-delimited, so a phrase matches only when each of
+/// its words is a complete token. Raw `contains` would match a phrase that
+/// merely straddles a longer word, which is how `"dm me"` fired on
+/// `"DM mechanism"` in production.
+fn contains_phrase(content: &str, phrases: &[&str]) -> bool {
+    let lower = content.to_lowercase();
+    let normalized: String = lower
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let padded = format!(" {normalized} ");
+    phrases
+        .iter()
+        .any(|phrase| padded.contains(&format!(" {phrase} ")))
 }
 
 /// Detect pathological repetition cheaply. This is a positive routing signal:
@@ -1217,6 +1237,36 @@ mod tests {
                 "false positive on {benign:?}"
             );
         }
+    }
+
+    /// Real production misfire, 2026-07-30: this on-topic message about
+    /// River's DM feature was sent to the classifier because `"dm me"` is a
+    /// substring of `"DM me`chanism`"`. The model correctly allowed it, so the
+    /// only cost was budget, but the routing was wrong.
+    #[test]
+    fn contact_lure_routing_does_not_fire_on_dm_mechanism() {
+        let quiet = crate::event::TemporalSignals {
+            author_messages_10_seconds: 1,
+            author_messages_1_minute: 1,
+            author_messages_5_minutes: 1,
+            milliseconds_since_author_previous: None,
+            exact_duplicate_count_5_minutes: 0,
+            claimed_clock_skew_seconds: 0,
+        };
+        assert!(!is_high_signal_message(
+            &message("now just invite people to your room via DM mechanism."),
+            &quiet
+        ));
+        // The genuine lure it exists to catch must still route.
+        assert!(is_high_signal_message(
+            &message("Can Someone DM me so i can give info and test"),
+            &quiet
+        ));
+        assert!(contains_phrase("please cash app me", CONTACT_LURE_PHRASES));
+        assert!(!contains_phrase(
+            "the cash appraisal is due",
+            CONTACT_LURE_PHRASES
+        ));
     }
 
     #[test]
