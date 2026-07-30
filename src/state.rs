@@ -479,6 +479,27 @@ impl ModerationState {
             write.commit()?;
             return Ok(false);
         }
+        // One warning per MEMBER, not per message. A wrongly-set clock dates
+        // EVERY message ahead, so keying only on the message produced a public
+        // warning per message: WTYSSSJ7 got two 45 seconds apart on 2026-07-30.
+        // The member already has a deadline running and the ban that follows
+        // sweeps all their messages, so a second notice adds noise and no
+        // remedy.
+        let mut member_already_pending = false;
+        for entry in table.iter()? {
+            let (_, value) = entry?;
+            let existing: PendingTimestampEnforcement = serde_json::from_slice(value.value())?;
+            if existing.room_owner == pending.room_owner && existing.member_id == pending.member_id
+            {
+                member_already_pending = true;
+                break;
+            }
+        }
+        if member_already_pending {
+            drop(table);
+            write.commit()?;
+            return Ok(false);
+        }
         let encoded = serde_json::to_vec(pending)?;
         table.insert(key.as_str(), encoded.as_slice())?;
         drop(table);
@@ -958,6 +979,50 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    /// A wrongly-set clock dates EVERY message ahead. Keying the reservation on
+    /// the message alone produced one public warning per message -- WTYSSSJ7 got
+    /// two 45 seconds apart on 2026-07-30. One deadline per member is enough,
+    /// because the ban that follows sweeps all their messages anyway.
+    #[test]
+    fn a_member_gets_one_warning_however_many_messages_they_post() {
+        let dir = tempdir().unwrap();
+        let state = ModerationState::open(&dir.path().join("state.redb")).unwrap();
+        let pending = |msg: &str| PendingTimestampEnforcement {
+            reason: SelfDeleteReason::FutureTimestamp,
+            room_owner: "room".into(),
+            member_id: "member".into(),
+            target_message_id: msg.into(),
+            target_content_hash: "hash".into(),
+            warning_message_id: None,
+            claimed_skew_seconds: 19812,
+            warned_at: at(0),
+            enforce_after: at(0) + Duration::seconds(120),
+        };
+        assert!(state
+            .schedule_timestamp_enforcement(&pending("first"))
+            .unwrap());
+        assert!(
+            !state
+                .schedule_timestamp_enforcement(&pending("second"))
+                .unwrap(),
+            "a second message from the same member must not earn a second warning"
+        );
+
+        // A DIFFERENT member is unaffected.
+        let other = PendingTimestampEnforcement {
+            member_id: "other-member".into(),
+            target_message_id: "third".into(),
+            ..pending("third")
+        };
+        assert!(state.schedule_timestamp_enforcement(&other).unwrap());
+
+        // Once resolved, the member can be warned again for a later offence.
+        state.clear_timestamp_enforcement("room", "first").unwrap();
+        assert!(state
+            .schedule_timestamp_enforcement(&pending("fourth"))
+            .unwrap());
     }
 
     #[test]

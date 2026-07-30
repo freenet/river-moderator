@@ -1158,6 +1158,21 @@ async fn timestamp_enforcement_loop(config: Arc<Config>, state: Arc<ModerationSt
                         evidence = %evidence,
                         "banned: message not deleted before the deadline"
                     );
+                    // Retract the warning on THIS path too. The ban sweeps the
+                    // member's messages, so a surviving warning replies to
+                    // something that no longer exists and renders as "Original
+                    // message unavailable" -- which reads to everyone else as a
+                    // ban with no warning, the exact opposite of what happened.
+                    if let Some(warning_id) = pending.warning_message_id.as_deref() {
+                        if let Err(error) =
+                            delete_own_message(&config.river, &pending.room_owner, warning_id).await
+                        {
+                            tracing::error!(
+                                error = %format!("{error:#}"),
+                                "could not retract the warning after banning"
+                            );
+                        }
+                    }
                 }
                 Err(error) => tracing::error!(
                     error = %format!("{error:#}"),
