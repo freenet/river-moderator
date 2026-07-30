@@ -17,6 +17,11 @@ const MAX_OUTPUT_BYTES: usize = 16 * 1024;
 struct ActionResponse {
     status: String,
     action: String,
+    /// Present from riverctl 0.2.8 onward for `message reply`. Optional so an
+    /// older riverctl still parses: callers that need the ID check for `None`
+    /// rather than failing the reply itself.
+    #[serde(default)]
+    message_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -36,7 +41,7 @@ pub async fn send_fixed_reply(
     room_owner: &str,
     message_id: &str,
     text: &'static str,
-) -> Result<()> {
+) -> Result<Option<String>> {
     validate_executable(config.riverctl_path.as_path())?;
     let mut command = Command::new(&config.riverctl_path);
     command
@@ -84,6 +89,64 @@ pub async fn send_fixed_reply(
     anyhow::ensure!(
         response.status == "success" && response.action == "reply",
         "unexpected River reply response"
+    );
+    // `None` on an older riverctl that predates 0.2.8. The reply still landed;
+    // the caller simply cannot clean it up later.
+    Ok(response.message_id)
+}
+
+/// Delete a message the moderator itself authored.
+///
+/// The room contract permits deletion only by the original author
+/// (`room_state/message.rs`), so this can never remove a member's message. It
+/// exists to retract the moderator's own reply once the message it referred to
+/// is gone, rather than leaving a public warning pointing at nothing.
+pub async fn delete_own_message(
+    config: &RiverConfig,
+    room_owner: &str,
+    message_id: &str,
+) -> Result<()> {
+    validate_executable(config.riverctl_path.as_path())?;
+    let mut command = Command::new(&config.riverctl_path);
+    command
+        .env_clear()
+        .env("RIVERCTL_NO_VERSION_CHECK", "1")
+        .arg("--no-version-check")
+        .arg("--node-url")
+        .arg(&config.node_url)
+        .arg("--config-dir")
+        .arg(&config.config_dir)
+        .arg("--format")
+        .arg("json")
+        .arg("message")
+        .arg("delete")
+        .arg(room_owner)
+        // River message IDs are signed i64 values; `--` keeps a negative ID
+        // from being parsed as an option.
+        .arg("--")
+        .arg(message_id)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(ACTION_TIMEOUT, command.output())
+        .await
+        .context("River delete timed out and was not retried")??;
+    anyhow::ensure!(
+        output.stdout.len() <= MAX_OUTPUT_BYTES && output.stderr.len() <= MAX_OUTPUT_BYTES,
+        "River delete output is oversized"
+    );
+    anyhow::ensure!(
+        output.status.success(),
+        "River delete failed with status {}; stderr={:?}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: ActionResponse =
+        serde_json::from_slice(&output.stdout).context("invalid River delete response")?;
+    anyhow::ensure!(
+        response.status == "success" && response.action == "delete",
+        "unexpected River delete response"
     );
     Ok(())
 }

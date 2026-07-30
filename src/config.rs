@@ -352,9 +352,40 @@ pub struct LimitConfig {
     pub concurrency: usize,
 }
 
+fn default_future_timestamp_seconds() -> i64 {
+    300
+}
+
+fn default_future_timestamp_grace_seconds() -> u64 {
+    120
+}
+
+fn default_embedded_image_grace_seconds() -> u64 {
+    60
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyConfig {
+    /// How far ahead of local observation a claimed timestamp may be before the
+    /// message is treated as pinning itself to the bottom of the room.
+    ///
+    /// Measured against 2523 production messages: 97.7% land within +/-1 minute
+    /// and the 99th percentile is +5 SECONDS, so 5 minutes clears ordinary clock
+    /// drift by two orders of magnitude. Every real offender in that sample was
+    /// an hour or more ahead.
+    #[serde(default = "default_future_timestamp_seconds")]
+    pub future_timestamp_seconds: i64,
+    /// How long the author has to delete a future-dated message before it is
+    /// enforced. Their own deletion is the only remedy: the contract lets only
+    /// the author delete, so the moderator cannot clear it for them.
+    #[serde(default = "default_future_timestamp_grace_seconds")]
+    pub future_timestamp_grace_seconds: u64,
+    /// Deletion window for an embedded image. Shorter than the timestamp case:
+    /// a future-dated "hlo" is usually a broken clock, whereas an embedded image
+    /// is always deliberate, and what it shows is visible to everyone meanwhile.
+    #[serde(default = "default_embedded_image_grace_seconds")]
+    pub embedded_image_grace_seconds: u64,
     pub warning_window_hours: u64,
     pub low_severity_grace_seconds: u64,
     pub global_action_interval_seconds: u64,
