@@ -1,0 +1,82 @@
+[service]
+# Enforcement is release-gated. Begin with shadow mode.
+mode = "shadow"
+state_database = "/var/lib/river-moderator/state.redb"
+# Required in warn mode. Only messages first observed at or after this cutoff
+# may produce a public action; shadow history is never replayed.
+# activation_at = "2026-01-01T00:00:00Z"
+
+[audit]
+# Contains bounded message text and is created mode 0600. Journald receives only
+# member IDs, hashes, categories, and outcomes.
+path = "/var/lib/river-moderator/ban-audit.jsonl"
+decision_path = "/var/lib/river-moderator/decision-audit.jsonl"
+retention_days = 30
+max_context_messages = 20
+max_message_bytes = 4096
+
+[river]
+# Installed root-owned binary used by the localhost-only River reader.
+riverctl_path = "/usr/local/bin/riverctl"
+config_dir = "/var/lib/river-moderator/river"
+node_url = "ws://127.0.0.1:7509/v1/contract/command?encodingProtocol=native"
+expected_contract_key = "replace-with-derived-contract-key"
+ban_signing_key_file = "/run/credentials/river-moderator.service/room_owner_signing_key"
+allow_remote_node = false
+max_event_bytes = 65536
+
+[room]
+owner_verifying_key = "REPLACE_WITH_ROOM_OWNER_VERIFYING_KEY"
+topic = "Freenet, River, decentralized systems, and closely related project work"
+protected_member_ids = []
+protected_nicknames = ["Room Owner", "Invite Bot", "River Marshal", "Moderator"]
+service_member_ids = []
+
+[model]
+provider = "open_ai"
+classifier_name = "gpt-5.6-luna"
+verifier_name = "gpt-5.6-sol"
+# Supplied by systemd LoadCredential; never store the key in this file.
+api_key_file = "/run/credentials/river-moderator.service/openai_api_key"
+request_timeout_seconds = 45
+max_response_bytes = 65536
+# Request serialization is bounded before the budget reservation.
+max_input_bytes = 12000
+max_output_tokens = 512
+# Explicit current prices in micro-USD per one million tokens. The service
+# reserves before the request and reconciles from provider-reported usage.
+classifier_input_microusd_per_million_tokens = 1000000
+classifier_output_microusd_per_million_tokens = 6000000
+verifier_input_microusd_per_million_tokens = 5000000
+verifier_output_microusd_per_million_tokens = 30000000
+
+[limits]
+# One USD is 1,000,000 micro-USD. These local caps are checked before network I/O.
+daily_budget_microusd = 1000000
+monthly_budget_microusd = 15000000
+requests_per_minute = 120
+requests_per_hour = 500
+requests_per_day = 5000
+requests_per_author_hour = 120
+queue_depth = 200
+concurrency = 4
+
+[policy]
+warning_window_hours = 24
+low_severity_grace_seconds = 60
+global_action_interval_seconds = 300
+member_action_cooldown_hours = 24
+max_pending_action_age_seconds = 300
+max_ban_descendants = 0
+ban_global_interval_seconds = 60
+bans_per_hour = 5
+bans_per_day = 20
+ban_confidence_millionths = 980000
+deputy_ban_confidence_millionths = 995000
+nudge_confidence_millionths = 850000
+warning_confidence_millionths = 900000
+regular_after_days = 7
+regular_after_messages = 10
+established_after_days = 30
+established_after_active_days = 10
+established_after_messages = 50

@@ -1,0 +1,69 @@
+[service]
+mode = "shadow"
+state_database = "/var/lib/river-moderator/state.redb"
+
+[audit]
+path = "/var/lib/river-moderator/ban-audit.jsonl"
+decision_path = "/var/lib/river-moderator/decision-audit.jsonl"
+retention_days = 30
+max_context_messages = 20
+max_message_bytes = 4096
+
+[river]
+riverctl_path = "/usr/local/bin/riverctl"
+config_dir = "/var/lib/river-moderator/river"
+node_url = "ws://127.0.0.1:7509/v1/contract/command?encodingProtocol=native"
+expected_contract_key = "4XwkMCQ4g1goJUzqVwdGgqEu2xgKHj7nge1GEXDDv4Yq"
+ban_signing_key_file = "/run/credentials/river-moderator-eval.service/room_owner_signing_key"
+allow_remote_node = false
+max_event_bytes = 65536
+
+[room]
+owner_verifying_key = "4uNUKFzZQCnzo4K2ecZ16cMsYEEfoaRS35z6exEsbvm4"
+topic = "Freenet, River, decentralized systems, and closely related project work"
+protected_member_ids = ["NRKA4WVX", "7XSOGJTK", "DLQVWAIV", "NJFUM6VZ", "FPVN6PUN", "TKNQU26Z", "4CLPTJPM"]
+service_member_ids = ["4CLPTJPM", "NRKA4WVX"]
+
+[model]
+provider = "open_ai"
+classifier_name = "gpt-5.6-luna"
+verifier_name = "gpt-5.6-sol"
+api_key_file = "/run/credentials/river-moderator-eval.service/openai_api_key"
+request_timeout_seconds = 45
+max_response_bytes = 65536
+max_input_bytes = 12000
+max_output_tokens = 512
+classifier_input_microusd_per_million_tokens = 1000000
+classifier_output_microusd_per_million_tokens = 6000000
+verifier_input_microusd_per_million_tokens = 5000000
+verifier_output_microusd_per_million_tokens = 30000000
+
+[limits]
+daily_budget_microusd = 5000000
+monthly_budget_microusd = 50000000
+requests_per_minute = 120
+requests_per_hour = 1000
+requests_per_day = 10000
+requests_per_author_hour = 120
+queue_depth = 200
+concurrency = 4
+
+[policy]
+warning_window_hours = 24
+low_severity_grace_seconds = 60
+global_action_interval_seconds = 300
+member_action_cooldown_hours = 24
+max_pending_action_age_seconds = 300
+max_ban_descendants = 0
+ban_global_interval_seconds = 60
+bans_per_hour = 5
+bans_per_day = 20
+ban_confidence_millionths = 980000
+deputy_ban_confidence_millionths = 995000
+nudge_confidence_millionths = 850000
+warning_confidence_millionths = 900000
+regular_after_days = 7
+regular_after_messages = 10
+established_after_days = 30
+established_after_active_days = 10
+established_after_messages = 50

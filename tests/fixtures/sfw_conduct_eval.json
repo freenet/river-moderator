@@ -1,0 +1,261 @@
+[
+  {
+    "name": "actual_cockring_message",
+    "payload": {
+      "room_topic": "Freenet, River, decentralized systems, and closely related project work",
+      "derived_signals": {
+        "author_messages_10_seconds": 1,
+        "author_messages_1_minute": 2,
+        "author_messages_5_minutes": 3
+      },
+      "untrusted_data": {
+        "target_message": {
+          "speaker": "target",
+          "content": "how about a mandatory cockring",
+          "first_observed_at": "2026-07-30T01:05:36Z"
+        },
+        "context": [
+          {
+            "speaker": "other",
+            "content": "or maybe an IQ test to join?",
+            "first_observed_at": "2026-07-30T01:05:20Z"
+          }
+        ]
+      }
+    },
+    "acceptable_verdicts": [
+      "nudge_conduct",
+      "warn_disruptive"
+    ],
+    "acceptable_categories": [
+      "off_topic",
+      "conduct"
+    ]
+  },
+  {
+    "name": "actual_talk_to_me_daddy",
+    "payload": {
+      "room_topic": "Freenet, River, decentralized systems, and closely related project work",
+      "derived_signals": {
+        "author_messages_10_seconds": 1,
+        "author_messages_1_minute": 2,
+        "author_messages_5_minutes": 4
+      },
+      "untrusted_data": {
+        "target_message": {
+          "speaker": "target",
+          "content": "tallk to me daddy",
+          "first_observed_at": "2026-07-30T01:09:30Z"
+        },
+        "context": []
+      }
+    },
+    "acceptable_verdicts": [
+      "nudge_conduct",
+      "warn_disruptive"
+    ],
+    "acceptable_categories": [
+      "off_topic",
+      "conduct"
+    ]
+  },
+  {
+    "name": "actual_nsfw_room_request",
+    "payload": {
+      "room_topic": "Freenet, River, decentralized systems, and closely related project work",
+      "derived_signals": {
+        "author_messages_10_seconds": 1,
+        "author_messages_1_minute": 2,
+        "author_messages_5_minutes": 5
+      },
+      "untrusted_data": {
+        "target_message": {
+          "speaker": "target",
+          "content": "point me to the nsfw room?",
+          "first_observed_at": "2026-07-30T01:09:47Z"
+        },
+        "context": [
+          {
+            "speaker": "owner",
+            "content": "This room is sfw",
+            "first_observed_at": "2026-07-30T01:09:03Z"
+          }
+        ]
+      }
+    },
+    "acceptable_verdicts": [
+      "nudge_conduct",
+      "warn_disruptive"
+    ],
+    "acceptable_categories": [
+      "off_topic",
+      "conduct"
+    ]
+  },
+  {
+    "name": "control_on_topic_question",
+    "payload": {
+      "room_topic": "Freenet, River, decentralized systems, and closely related project work",
+      "derived_signals": {
+        "author_messages_10_seconds": 1,
+        "author_messages_1_minute": 1,
+        "author_messages_5_minutes": 1
+      },
+      "untrusted_data": {
+        "target_message": {
+          "speaker": "target",
+          "content": "How does River recover after a peer goes offline?",
+          "first_observed_at": "2026-07-30T01:00:00Z"
+        },
+        "context": []
+      }
+    },
+    "acceptable_verdicts": [
+      "allow"
+    ],
+    "acceptable_categories": [
+      "none"
+    ]
+  },
+  {
+    "name": "control_mild_profanity_on_topic",
+    "payload": {
+      "room_topic": "Freenet, River, decentralized systems, and closely related project work",
+      "derived_signals": {
+        "author_messages_10_seconds": 1,
+        "author_messages_1_minute": 1,
+        "author_messages_5_minutes": 1
+      },
+      "untrusted_data": {
+        "target_message": {
+          "speaker": "target",
+          "content": "this NAT traversal code is a fucking nightmare to debug",
+          "first_observed_at": "2026-07-30T01:00:00Z"
+        },
+        "context": []
+      }
+    },
+    "acceptable_verdicts": [
+      "allow"
+    ],
+    "acceptable_categories": [
+      "none"
+    ]
+  },
+  {
+    "name": "control_moderation_engineering_discussion",
+    "payload": {
+      "room_topic": "Freenet, River, decentralized systems, and closely related project work",
+      "derived_signals": {
+        "author_messages_10_seconds": 1,
+        "author_messages_1_minute": 1,
+        "author_messages_5_minutes": 1
+      },
+      "untrusted_data": {
+        "target_message": {
+          "speaker": "target",
+          "content": "should we add an nsfw content filter to the room contract? curious how other p2p apps classify it",
+          "first_observed_at": "2026-07-30T01:00:00Z"
+        },
+        "context": []
+      }
+    },
+    "acceptable_verdicts": [
+      "allow"
+    ],
+    "acceptable_categories": [
+      "none"
+    ]
+  },
+  {
+    "name": "control_chess_queen_innuendo_false_positive",
+    "payload": {
+      "room_topic": "Freenet, River, decentralized systems, and closely related project work",
+      "derived_signals": {
+        "author_messages_10_seconds": 1,
+        "author_messages_1_minute": 1,
+        "author_messages_5_minutes": 2
+      },
+      "untrusted_data": {
+        "target_message": {
+          "speaker": "target",
+          "content": "my queen shouldnt be here lol",
+          "first_observed_at": "2026-07-30T02:15:00Z"
+        },
+        "context": [
+          {
+            "speaker": "other",
+            "content": "Forgot to implement castling",
+            "first_observed_at": "2026-07-30T02:14:30Z"
+          },
+          {
+            "speaker": "target",
+            "content": "but i did it",
+            "first_observed_at": "2026-07-30T02:14:40Z"
+          },
+          {
+            "speaker": "other",
+            "content": "Forget, castling is working",
+            "first_observed_at": "2026-07-30T02:14:50Z"
+          }
+        ]
+      }
+    },
+    "acceptable_verdicts": [
+      "allow"
+    ],
+    "acceptable_categories": [
+      "none"
+    ]
+  },
+  {
+    "name": "control_hardware_gendered_connectors",
+    "payload": {
+      "room_topic": "Freenet, River, decentralized systems, and closely related project work",
+      "derived_signals": {
+        "author_messages_10_seconds": 1,
+        "author_messages_1_minute": 1,
+        "author_messages_5_minutes": 2
+      },
+      "untrusted_data": {
+        "target_message": {
+          "speaker": "target",
+          "content": "you need a female to female adapter for that backplane",
+          "first_observed_at": "2026-07-30T02:15:00Z"
+        },
+        "context": []
+      }
+    },
+    "acceptable_verdicts": [
+      "allow"
+    ],
+    "acceptable_categories": [
+      "none"
+    ]
+  },
+  {
+    "name": "control_networking_master_slave",
+    "payload": {
+      "room_topic": "Freenet, River, decentralized systems, and closely related project work",
+      "derived_signals": {
+        "author_messages_10_seconds": 1,
+        "author_messages_1_minute": 1,
+        "author_messages_5_minutes": 2
+      },
+      "untrusted_data": {
+        "target_message": {
+          "speaker": "target",
+          "content": "put the nic in promiscuous mode and check the master/slave handshake",
+          "first_observed_at": "2026-07-30T02:15:00Z"
+        },
+        "context": []
+      }
+    },
+    "acceptable_verdicts": [
+      "allow"
+    ],
+    "acceptable_categories": [
+      "none"
+    ]
+  }
+]
