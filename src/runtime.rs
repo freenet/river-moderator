@@ -244,28 +244,60 @@ pub async fn run_moderator(config: Config) -> Result<()> {
     anyhow::bail!("River event channel closed")
 }
 
+/// If no event arrives for this long, the subscription is presumed dead and
+/// the reader forces a reconnect rather than waiting indefinitely.
+///
+/// 2026-07-31: the underlying node hit real transport congestion (cwnd/ACK
+/// stalls, "peer not found", WebSocket resets -- all node-side, confirmed in
+/// its own logs) and the riverctl subscription went silent for ~40 minutes,
+/// TWICE, with no error on either end: the subprocess never exited, so the
+/// existing `Ok(None)`/`Err` reconnect paths never fired. `next_event` has no
+/// timeout of its own, so the reader just waited.
+///
+/// This does not fix the underlying network congestion -- that's an external
+/// condition, not a bug here. It bounds how long a stall can silently persist
+/// before the reader takes matters into its own hands. 3 minutes is well
+/// above ordinary quiet-room gaps observed today (activity resumes within
+/// seconds to low minutes even during lulls), so it should not trigger a
+/// reconnect during a merely-quiet period, while cutting a real stall from
+/// ~40 minutes down to a few.
+const READER_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
 async fn reader_loop(config: Arc<Config>, sender: mpsc::Sender<RoomEvent>) {
     loop {
         match spawn_reader(&config.river, &config.room.owner_verifying_key) {
             Ok(mut reader) => {
                 tracing::info!(riverctl_pid = reader.process_id(), "River reader connected");
                 loop {
-                    match reader.next_event(config.river.max_event_bytes).await {
-                        Ok(Some(event)) => match sender.try_send(event) {
+                    match tokio::time::timeout(
+                        READER_IDLE_TIMEOUT,
+                        reader.next_event(config.river.max_event_bytes),
+                    )
+                    .await
+                    {
+                        Ok(Ok(Some(event))) => match sender.try_send(event) {
                             Ok(()) => {}
                             Err(mpsc::error::TrySendError::Full(_)) => {
                                 tracing::error!("moderation queue full; event dropped")
                             }
                             Err(mpsc::error::TrySendError::Closed(_)) => return,
                         },
-                        Ok(None) => {
+                        Ok(Ok(None)) => {
                             tracing::warn!("River reader exited; reconnecting");
                             break;
                         }
-                        Err(error) => {
+                        Ok(Err(error)) => {
                             tracing::error!(
                                 error = %format!("{error:#}"),
                                 "River reader failed; reconnecting"
+                            );
+                            break;
+                        }
+                        Err(_elapsed) => {
+                            tracing::error!(
+                                idle_seconds = READER_IDLE_TIMEOUT.as_secs(),
+                                "no events received within the idle timeout; forcing reconnect \
+                                 (possible silent subscription stall)"
                             );
                             break;
                         }
@@ -1817,6 +1849,39 @@ fn compression_ratio_is_suspicious(content: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `reader_loop` is a subprocess-driven I/O loop, not cleanly unit-testable
+    /// without mocking process I/O, so this pins the WIRING by source scrape
+    /// instead: the idle-timeout path must exist, wrap the actual read, and
+    /// force a reconnect exactly like the existing exited/errored paths do.
+    /// Cut at `mod tests` so the needles cannot match their own literals here
+    /// -- the trap that made the sibling `message reply` pin vacuous.
+    #[test]
+    fn reader_loop_forces_reconnect_on_idle_timeout() {
+        let source = include_str!("runtime.rs");
+        let production = source
+            .split_once("mod tests")
+            .map(|(before, _)| before)
+            .expect("test module marker missing; the cut would scan everything");
+        let squashed: String = production.chars().filter(|c| !c.is_whitespace()).collect();
+
+        assert!(
+            squashed.contains("tokio::time::timeout(READER_IDLE_TIMEOUT,reader.next_event("),
+            "next_event must be wrapped in the idle timeout; the pin would pass vacuously otherwise"
+        );
+        assert!(
+            squashed.contains("forcingreconnect"),
+            "an elapsed idle timeout must log and force a reconnect, not retry silently"
+        );
+        // A `break` inside that arm is what actually drops the old `RiverReader`
+        // (killing the stale subprocess via `kill_on_drop`) and falls through
+        // to the existing 5-second-sleep-then-`spawn_reader` reconnect path --
+        // the same recovery mechanism the exited/errored branches already use.
+        assert!(
+            squashed.contains(r#"idle_seconds=READER_IDLE_TIMEOUT.as_secs(),"#),
+            "the elapsed branch must report the timeout that fired"
+        );
+    }
 
     fn message(content: &str) -> VerifiedMessage {
         VerifiedMessage {
