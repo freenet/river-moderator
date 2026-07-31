@@ -49,7 +49,15 @@ fn decide_nudge(input: &PolicyInput<'_>, policy: &PolicyConfig) -> PolicyAction 
     }
     if !matches!(
         input.classification.category,
-        Category::OffTopic | Category::Conduct | Category::Incivility | Category::PersonalAttack
+        Category::OffTopic
+            | Category::Conduct
+            | Category::Incivility
+            | Category::PersonalAttack
+            // A nudge-tier `Hate` finding is reserved for a hate-trope NICKNAME
+            // paired with an otherwise benign message (2026-07-31: "Its The
+            // Jews", message was a wave emoji). Message-content hate stays on
+            // the `ban_severe_harm` path via `decide_severe`, unaffected by this.
+            | Category::Hate
     ) {
         return PolicyAction::HumanReview;
     }
@@ -265,6 +273,28 @@ mod tests {
         assert_eq!(decide(&input, &policy()), PolicyAction::RecordDisruption);
         input.trust_tier = TrustTier::Deputy;
         assert_eq!(decide(&input, &policy()), PolicyAction::RecordDisruption);
+    }
+
+    /// A nudge-tier `Hate` finding is reserved for a hate-trope NICKNAME on an
+    /// otherwise benign message (2026-07-31: "Its The Jews", message was a wave
+    /// emoji). Before this, `Category::Hate` was outside `decide_nudge`'s
+    /// whitelist, so the classifier's own recommended verdict routed to
+    /// `HumanReview` instead of an actual public nudge -- no visible action.
+    #[test]
+    fn hate_trope_nickname_produces_a_real_nudge_not_human_review() {
+        let c = classification(Verdict::NudgeConduct, Category::Hate, 990_000);
+        let mut input = PolicyInput {
+            classification: &c,
+            verifier: None,
+            trust_tier: TrustTier::Probationary,
+            prior_category_observations: 0,
+            has_active_warning: false,
+            descendant_count: 0,
+        };
+        assert_eq!(decide(&input, &policy()), PolicyAction::NudgeAsModerator);
+        // A second occurrence escalates like any other nudge category.
+        input.prior_category_observations = 1;
+        assert_eq!(decide(&input, &policy()), PolicyAction::WarnAsModerator);
     }
 
     #[test]
