@@ -1,6 +1,11 @@
 use crate::verdict::Category;
 
 pub const CONDUCT_NUDGE: &str = "Easy. Attack the idea, not the person.";
+/// A nudge-tier `Hate` finding is reserved for a hate-trope nickname on an
+/// otherwise benign message, so `CONDUCT_NUDGE`'s "attack the idea" framing is
+/// wrong here — there is no idea being attacked, there is a nickname to change.
+pub const HATE_NICKNAME_NUDGE: &str =
+    "Your nickname reads as a hateful reference. Please change it — repeated or ignored, it leads to removal.";
 /// Off-topic covers every unrelated tangent, so this text must not name one.
 /// It previously read "Take the politics elsewhere", which was delivered to a
 /// chess-engine discussion on 2026-07-30 and made a misfire look absurd rather
@@ -39,10 +44,10 @@ pub const EMBEDDED_IMAGE_WARNING: &str = "Embedded images aren't allowed in this
 pub const BAD_REACTION_NOTICE: &str = " that reaction isn't a standard emoji, so please remove it within 2 minutes or you'll lose access to the room. Ordinary emoji reactions are fine.";
 
 pub fn fixed_nudge(category: Category) -> &'static str {
-    if category == Category::OffTopic {
-        TOPIC_NUDGE
-    } else {
-        CONDUCT_NUDGE
+    match category {
+        Category::OffTopic => TOPIC_NUDGE,
+        Category::Hate => HATE_NICKNAME_NUDGE,
+        _ => CONDUCT_NUDGE,
     }
 }
 
@@ -77,6 +82,18 @@ mod tests {
         assert_eq!(CONDUCT_NUDGE, "Easy. Attack the idea, not the person.");
         assert_eq!(fixed_nudge(Category::OffTopic), TOPIC_NUDGE);
         assert_eq!(fixed_nudge(Category::Incivility), CONDUCT_NUDGE);
+    }
+
+    /// A nudge-tier `Hate` finding is nickname-only (see `policy.rs`), so its
+    /// text must tell the member to change their NICKNAME. `CONDUCT_NUDGE`'s
+    /// "attack the idea, not the person" framing is nonsensical here -- there
+    /// is no idea being attacked.
+    #[test]
+    fn hate_nudge_names_the_actual_remedy() {
+        assert_eq!(fixed_nudge(Category::Hate), HATE_NICKNAME_NUDGE);
+        let text = HATE_NICKNAME_NUDGE.to_lowercase();
+        assert!(text.contains("nickname"), "must name the actual remedy");
+        assert_ne!(HATE_NICKNAME_NUDGE, CONDUCT_NUDGE);
     }
 
     /// Measured against 2523 production messages, two of the three real
