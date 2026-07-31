@@ -31,6 +31,13 @@ pub const FUTURE_TIMESTAMP_WARNING: &str = "Your message is dated in the future,
 /// outright rather than judged case by case.
 pub const EMBEDDED_IMAGE_WARNING: &str = "Embedded images aren't allowed in this room yet. Please delete the message within 1 minute, or it will be removed along with your access. Links are fine.";
 
+/// Body of the reaction notice, appended after the offender's `@` mention.
+///
+/// Posted as a TOP-LEVEL message rather than a reply: a reaction has no message
+/// of its own, and replying to the reacted-to message would render the notice
+/// under an innocent party's post. The mention is what notifies the offender.
+pub const BAD_REACTION_NOTICE: &str = " that reaction isn't a standard emoji, so please remove it within 2 minutes or you'll lose access to the room. Ordinary emoji reactions are fine.";
+
 pub fn fixed_nudge(category: Category) -> &'static str {
     if category == Category::OffTopic {
         TOPIC_NUDGE

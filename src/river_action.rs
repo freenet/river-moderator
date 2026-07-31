@@ -95,6 +95,119 @@ pub async fn send_fixed_reply(
     Ok(response.message_id)
 }
 
+/// Post a top-level message and return its ID.
+///
+/// A reaction has no message of its own to reply to, and replying to the
+/// REACTED-TO message would render the notice under an innocent party's post.
+/// So the notice is posted at top level and names the offender with an
+/// `@[name](rv:id)` mention, which also notifies them.
+///
+/// The text is caller-built rather than `&'static str` because it must carry
+/// that mention. The invariant being preserved is that no MODEL-generated
+/// content reaches the room; a member ID the runtime derived deterministically
+/// is not model output. Callers must not interpolate anything else.
+pub async fn send_room_message(
+    config: &RiverConfig,
+    room_owner: &str,
+    text: &str,
+) -> Result<Option<String>> {
+    validate_executable(config.riverctl_path.as_path())?;
+    let mut command = Command::new(&config.riverctl_path);
+    command
+        .env_clear()
+        .env("RIVERCTL_NO_VERSION_CHECK", "1")
+        .arg("--no-version-check")
+        .arg("--node-url")
+        .arg(&config.node_url)
+        .arg("--config-dir")
+        .arg(&config.config_dir)
+        .arg("--format")
+        .arg("json")
+        .arg("message")
+        .arg("send")
+        .arg(room_owner)
+        .arg(text)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(ACTION_TIMEOUT, command.output())
+        .await
+        .context("River send timed out and was not retried")??;
+    anyhow::ensure!(
+        output.stdout.len() <= MAX_OUTPUT_BYTES && output.stderr.len() <= MAX_OUTPUT_BYTES,
+        "River send output is oversized"
+    );
+    anyhow::ensure!(
+        output.status.success(),
+        "River send failed with status {}; stderr={:?}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: ActionResponse =
+        serde_json::from_slice(&output.stdout).context("invalid River send response")?;
+    anyhow::ensure!(
+        response.status == "success",
+        "unexpected River send response"
+    );
+    Ok(response.message_id)
+}
+
+#[derive(Debug, Deserialize)]
+struct ListedMessage {
+    message_id: String,
+    #[serde(default)]
+    reactors: std::collections::HashMap<String, Vec<String>>,
+}
+
+/// Is `member` still reacting to `message_id` with `emoji`?
+///
+/// Read fresh from the room rather than from local state: the whole point of
+/// the deadline is to see whether they complied, and only the room can answer
+/// that. A message that has aged out of the retained window counts as NOT
+/// present -- the reaction is gone from everyone's view either way, so there is
+/// nothing left to enforce.
+pub async fn reaction_is_present(
+    config: &RiverConfig,
+    room_owner: &str,
+    message_id: &str,
+    emoji: &str,
+    member_id: &str,
+) -> Result<bool> {
+    validate_executable(config.riverctl_path.as_path())?;
+    let mut command = Command::new(&config.riverctl_path);
+    command
+        .env_clear()
+        .env("RIVERCTL_NO_VERSION_CHECK", "1")
+        .arg("--no-version-check")
+        .arg("--node-url")
+        .arg(&config.node_url)
+        .arg("--config-dir")
+        .arg(&config.config_dir)
+        .arg("--format")
+        .arg("json")
+        .arg("message")
+        .arg("list")
+        .arg("--limit")
+        .arg("100")
+        .arg(room_owner)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(ACTION_TIMEOUT, command.output())
+        .await
+        .context("River list timed out")??;
+    anyhow::ensure!(output.status.success(), "River list failed");
+    let listed: Vec<ListedMessage> =
+        serde_json::from_slice(&output.stdout).context("invalid River list response")?;
+    Ok(listed
+        .iter()
+        .find(|m| m.message_id == message_id)
+        .and_then(|m| m.reactors.get(emoji))
+        .is_some_and(|ids| ids.iter().any(|id| id == member_id)))
+}
+
 /// Delete a message the moderator itself authored.
 ///
 /// The room contract permits deletion only by the original author

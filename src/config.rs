@@ -364,6 +364,10 @@ fn default_embedded_image_grace_seconds() -> u64 {
     60
 }
 
+fn default_bad_reaction_grace_seconds() -> u64 {
+    120
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyConfig {
@@ -391,6 +395,9 @@ pub struct PolicyConfig {
     /// is always deliberate, and what it shows is visible to everyone meanwhile.
     #[serde(default = "default_embedded_image_grace_seconds")]
     pub embedded_image_grace_seconds: u64,
+    /// Deletion window for a non-emoji reaction.
+    #[serde(default = "default_bad_reaction_grace_seconds")]
+    pub bad_reaction_grace_seconds: u64,
     pub warning_window_hours: u64,
     pub low_severity_grace_seconds: u64,
     pub global_action_interval_seconds: u64,

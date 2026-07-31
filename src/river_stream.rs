@@ -21,7 +21,12 @@ pub enum RoomEvent {
         first_observed_at: DateTime<Utc>,
     },
     Reaction {
+        room_owner: String,
         message_id: String,
+        /// emoji -> the members who reacted with it. Exposed by riverctl 0.2.9;
+        /// before that only a count crossed the boundary, so a reaction could
+        /// not be attributed to anyone and therefore could not be moderated.
+        reactors: std::collections::HashMap<String, Vec<String>>,
     },
 }
 
@@ -65,6 +70,12 @@ struct WireDelete {
 #[derive(Debug, Deserialize)]
 struct WireReaction {
     message_id: String,
+    room: String,
+    /// Absent on riverctl older than 0.2.9; an empty map then means "cannot
+    /// attribute", which the runtime treats as nothing to act on rather than
+    /// guessing.
+    #[serde(default)]
+    reactors: std::collections::HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,7 +111,9 @@ pub fn parse_event(line: &[u8], observed_at: DateTime<Utc>) -> Result<RoomEvent>
             first_observed_at: observed_at,
         }),
         WireEvent::Reaction(reaction) => Ok(RoomEvent::Reaction {
+            room_owner: reaction.room,
             message_id: reaction.message_id,
+            reactors: reaction.reactors,
         }),
     }
 }

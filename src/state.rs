@@ -121,6 +121,10 @@ pub enum SelfDeleteReason {
     /// live `<img>`; until that is properly bounded a malicious embed can put
     /// arbitrary picture content in front of everyone in the room.
     EmbeddedImage,
+    /// A reaction payload that is not a single emoji. `ReactionPayload.emoji` is
+    /// unvalidated free text with no cap on size or count, so it is an
+    /// unbounded field that replicates to every peer.
+    BadReaction,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -138,6 +142,11 @@ pub struct PendingTimestampEnforcement {
     /// the ID; the warning then simply stays.
     pub warning_message_id: Option<String>,
     pub claimed_skew_seconds: i64,
+    /// The offending reaction payload, for `BadReaction` only. Needed at the
+    /// deadline: unlike a message, a reaction is identified by (message, emoji,
+    /// member) rather than by an ID of its own.
+    #[serde(default)]
+    pub reaction_emoji: Option<String>,
     pub warned_at: DateTime<Utc>,
     pub enforce_after: DateTime<Utc>,
 }
@@ -997,6 +1006,7 @@ mod tests {
             target_content_hash: "hash".into(),
             warning_message_id: None,
             claimed_skew_seconds: 19812,
+            reaction_emoji: None,
             warned_at: at(0),
             enforce_after: at(0) + Duration::seconds(120),
         };
@@ -1037,6 +1047,7 @@ mod tests {
             target_content_hash: "hash".into(),
             warning_message_id: Some("warning-1".into()),
             claimed_skew_seconds: 3637,
+            reaction_emoji: None,
             warned_at: at(0),
             enforce_after: at(0) + Duration::seconds(120),
         };

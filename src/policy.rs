@@ -202,6 +202,7 @@ mod tests {
             future_timestamp_seconds: 60,
             future_timestamp_grace_seconds: 120,
             embedded_image_grace_seconds: 60,
+            bad_reaction_grace_seconds: 120,
             warning_window_hours: 24,
             low_severity_grace_seconds: 60,
             global_action_interval_seconds: 300,
