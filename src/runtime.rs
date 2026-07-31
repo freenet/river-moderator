@@ -148,6 +148,37 @@ pub async fn run_moderator(config: Config) -> Result<()> {
                 ..
             } => {
                 state.record_deletion(&room_owner, &message_id, first_observed_at)?;
+                // Retract the notice the INSTANT its target is gone, rather
+                // than waiting for the deadline sweep. The sweep only evaluates
+                // at `enforce_after`, so a member who complied at second 10 was
+                // left staring at a live "delete this or be removed" notice for
+                // the remaining ~110 seconds -- and once their message went, it
+                // rendered as "Original message unavailable", which reads as an
+                // unexplained accusation.
+                //
+                // Taking the record removes it, so the sweep cannot also act on
+                // this offence and ban someone who already complied.
+                if let Some(pending) = state.take_timestamp_enforcement(&room_owner, &message_id)? {
+                    if let Some(warning_id) = pending.warning_message_id.as_deref() {
+                        let retract_config = config.clone();
+                        let owner = room_owner.clone();
+                        let warning = warning_id.to_owned();
+                        let member = pending.member_id.clone();
+                        tokio::spawn(async move {
+                            match delete_own_message(&retract_config.river, &owner, &warning).await
+                            {
+                                Ok(()) => tracing::info!(
+                                    member_id = %member,
+                                    "target deleted by its author; notice retracted immediately"
+                                ),
+                                Err(error) => tracing::error!(
+                                    error = %format!("{error:#}"),
+                                    "could not retract the notice after compliance"
+                                ),
+                            }
+                        });
+                    }
+                }
             }
             RoomEvent::Reaction {
                 room_owner,

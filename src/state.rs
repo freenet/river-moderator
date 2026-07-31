@@ -533,6 +533,32 @@ impl ModerationState {
         Ok(due)
     }
 
+    /// Take the pending enforcement for `target_message_id`, if any.
+    ///
+    /// Removes and returns it in one step so a delete event and the deadline
+    /// sweep cannot both act on the same offence.
+    pub fn take_timestamp_enforcement(
+        &self,
+        room_owner: &str,
+        target_message_id: &str,
+    ) -> Result<Option<PendingTimestampEnforcement>> {
+        let key = event_key(room_owner, target_message_id);
+        let write = self.database.begin_write()?;
+        let mut table = write.open_table(PENDING_TIMESTAMP)?;
+        let existing = table.get(key.as_str())?;
+        let pending: Option<PendingTimestampEnforcement> = existing
+            .as_ref()
+            .map(|entry| serde_json::from_slice(entry.value()))
+            .transpose()?;
+        drop(existing);
+        if pending.is_some() {
+            table.remove(key.as_str())?;
+        }
+        drop(table);
+        write.commit()?;
+        Ok(pending)
+    }
+
     pub fn clear_timestamp_enforcement(
         &self,
         room_owner: &str,
@@ -994,6 +1020,45 @@ mod tests {
     /// the message alone produced one public warning per message -- WTYSSSJ7 got
     /// two 45 seconds apart on 2026-07-30. One deadline per member is enough,
     /// because the ban that follows sweeps all their messages anyway.
+    /// Compliance must be actionable the moment it happens. Taking the record
+    /// both hands it to the caller AND removes it, so the deadline sweep cannot
+    /// afterwards ban someone who already complied.
+    #[test]
+    fn taking_an_enforcement_removes_it_so_the_sweep_cannot_double_act() {
+        let dir = tempdir().unwrap();
+        let state = ModerationState::open(&dir.path().join("state.redb")).unwrap();
+        let pending = PendingTimestampEnforcement {
+            reason: SelfDeleteReason::FutureTimestamp,
+            room_owner: "room".into(),
+            member_id: "member".into(),
+            target_message_id: "msg".into(),
+            target_content_hash: "hash".into(),
+            warning_message_id: Some("notice-1".into()),
+            claimed_skew_seconds: 92,
+            reaction_emoji: None,
+            warned_at: at(0),
+            enforce_after: at(0) + Duration::seconds(120),
+        };
+        state.schedule_timestamp_enforcement(&pending).unwrap();
+
+        let taken = state.take_timestamp_enforcement("room", "msg").unwrap();
+        assert_eq!(
+            taken.expect("record must be returned").warning_message_id,
+            Some("notice-1".into()),
+            "the caller needs the notice ID to retract it"
+        );
+
+        // Gone for the sweep, so a complied-with offence cannot still ban.
+        assert!(state
+            .due_timestamp_enforcements(at(0) + Duration::seconds(600))
+            .unwrap()
+            .is_empty());
+        assert!(state
+            .take_timestamp_enforcement("room", "msg")
+            .unwrap()
+            .is_none());
+    }
+
     #[test]
     fn a_member_gets_one_warning_however_many_messages_they_post() {
         let dir = tempdir().unwrap();
