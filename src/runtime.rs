@@ -26,7 +26,7 @@ use crate::{
     river_stream::{spawn_reader, RoomEvent},
     state::{
         BanClaim, EventDisposition, LowSeverityAction, LowSeverityOutcome, ModerationState,
-        PendingBan, PendingLowSeverity, PendingTimestampEnforcement, SelfDeleteReason,
+        PendingBan, PendingLowSeverity, PendingTimestampEnforcement, SelfDeleteReason, StallGuard,
         WarningRecord,
     },
     verdict::{Category, Verdict},
@@ -75,6 +75,7 @@ pub async fn run_moderator(config: Config) -> Result<()> {
     let reader_config = config.clone();
     tokio::spawn(async move { reader_loop(reader_config, sender).await });
     let concurrency = Arc::new(Semaphore::new(config.limits.concurrency));
+    let stall_guard = StallGuard::new();
 
     tracing::info!(
         mode = ?config.service.mode,
@@ -86,6 +87,10 @@ pub async fn run_moderator(config: Config) -> Result<()> {
     );
 
     while let Some(event) = receiver.recv().await {
+        // Recorded for EVERY event, not just messages -- a delete or reaction
+        // is just as valid a liveness signal, and the stall this guards
+        // against silences all of them equally.
+        stall_guard.record_event();
         match event {
             RoomEvent::Message(message) => {
                 if message.room_owner != config.room.owner_verifying_key {
@@ -124,6 +129,7 @@ pub async fn run_moderator(config: Config) -> Result<()> {
                 let task_budgets = budgets.clone();
                 let task_audits = audits.clone();
                 let task_model = model.clone();
+                let task_stall_guard = stall_guard.clone();
                 tokio::spawn(async move {
                     let _permit = permit;
                     if let Err(error) = process_message(
@@ -133,6 +139,7 @@ pub async fn run_moderator(config: Config) -> Result<()> {
                         task_budgets,
                         task_audits,
                         task_model,
+                        task_stall_guard,
                         message,
                     )
                     .await
@@ -274,6 +281,11 @@ async fn reader_loop(config: Arc<Config>, sender: mpsc::Sender<RoomEvent>) {
     }
 }
 
+// One more Arc than clippy's default threshold, added for the stall guard.
+// Bundling it into an existing struct would mix an unrelated concern (event
+// timing) into either `RuntimeAudits` (decision/ban logs) or a new type not
+// worth introducing for one field.
+#[allow(clippy::too_many_arguments)]
 async fn process_message(
     config: Arc<Config>,
     state: Arc<ModerationState>,
@@ -281,6 +293,7 @@ async fn process_message(
     budgets: Arc<BudgetLedger>,
     audits: RuntimeAudits,
     model: Arc<OpenAiModelClient>,
+    stall_guard: Arc<StallGuard>,
     incoming_message: VerifiedMessage,
 ) -> Result<()> {
     let incoming_context = state.context(
@@ -566,7 +579,7 @@ async fn process_message(
             message.first_observed_at,
         )?
     };
-    let projected_action = decide(
+    let mut projected_action = decide(
         &PolicyInput {
             classification: &classifier.classification,
             verifier: verifier.as_ref().map(|result| &result.classification),
@@ -580,6 +593,25 @@ async fn process_message(
         },
         &config.policy,
     );
+    // `Category::Flooding` is fed by `author_messages_10_seconds`, which counts
+    // by OBSERVATION time, not send time. A reader stall followed by a
+    // catch-up burst compresses unrelated messages' observed timestamps
+    // together, spiking that count for reasons that have nothing to do with
+    // how the messages were actually typed. Two members were falsely flagged
+    // this way on 2026-07-31, and one received a public warning that had to
+    // be manually retracted -- the independent-confirmation pass does not
+    // save this case, because both samples see the same corrupted count and
+    // tend to agree rather than disagree. Suppress here instead, before any
+    // action (including the confirmation call) is taken.
+    if classifier.classification.category == Category::Flooding
+        && stall_guard.is_suppressing_flooding()
+    {
+        tracing::warn!(
+            member_id = %message.author_id,
+            "flooding action suppressed: recent reader stall makes the observed timing unreliable"
+        );
+        projected_action = crate::policy::PolicyAction::None;
+    }
     let decision_id = short_hash(&format!(
         "{}:{}:{}",
         message.room_owner,
