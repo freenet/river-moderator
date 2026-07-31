@@ -103,15 +103,9 @@ pub struct PendingLowSeverity {
     pub outcome: Option<LowSeverityOutcome>,
 }
 
-/// A future-dated message awaiting its author's deletion.
-///
-/// River orders and prunes by the SENDER-SUPPLIED timestamp, so a message dated
-/// ahead sits at the bottom of the room permanently and is the last thing
-/// evicted while legitimate messages roll off. Only the author may delete it,
-/// so the moderator can do nothing but ask, wait, and then remove the account.
-/// Why a message is awaiting its author's deletion. Both offences share one
-/// mechanism: only the author can delete, so the moderator can ask, wait, then
-/// remove the account.
+/// Why a message or reaction is awaiting its author's deletion. Every reason
+/// shares one mechanism: only the author may delete their own content, so the
+/// moderator can ask, wait, and then remove the account.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SelfDeleteReason {
@@ -166,6 +160,88 @@ struct ReportOutcome {
     reporter_id: String,
     observed_at: DateTime<Utc>,
     target_is_spam: bool,
+}
+
+/// Detects a "long silent gap, then a burst" processing pattern and reports
+/// whether we are still inside the grace period after one.
+///
+/// `author_messages_10_seconds` counts by `first_observed_at`, which is
+/// stamped when THIS PROCESS first observes a message, not when it was
+/// actually sent. If the reader silently stalls -- 2026-07-31: two ~40-minute
+/// stalls, zero errors logged either time -- and then catches up on a
+/// backlog, messages typed over a much longer real span all land within the
+/// same observed second, spuriously spiking the deterministic flood signal
+/// fed to the classifier. Two members (Skandragon, Raziel) were flagged this
+/// way at the SAME stall recovery; a third (7YBDIAZQ) received a public
+/// warning that had to be manually retracted -- the independent-confirmation
+/// pass did not save it, because both samples see the same corrupted input
+/// and tend to agree rather than disagree.
+///
+/// This does NOT fix the stall itself. It only stops the stall's aftermath
+/// from producing a false PUBLIC flooding action. Built entirely from this
+/// process's own wall-clock observations of event arrival -- nothing here
+/// trusts any user-supplied timestamp, so it cannot be gamed by a client
+/// claiming convenient times.
+pub struct StallGuard {
+    last_event_at: std::sync::Mutex<DateTime<Utc>>,
+    suppress_flooding_until_millis: std::sync::atomic::AtomicI64,
+}
+
+impl StallGuard {
+    /// No events for at least this long counts as a stall.
+    const STALL_GAP_SECONDS: i64 = 30;
+    /// How long to suppress a public flooding action once a stall's catch-up
+    /// burst has been observed. Generous relative to the 10-second flooding
+    /// window itself, since a large backlog can take a few seconds to drain.
+    const CATCHUP_GRACE_SECONDS: i64 = 30;
+
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            last_event_at: std::sync::Mutex::new(Utc::now()),
+            suppress_flooding_until_millis: std::sync::atomic::AtomicI64::new(0),
+        })
+    }
+
+    /// Call once per inbound room event, before dispatching it for processing.
+    pub fn record_event(&self) {
+        self.record_event_at(Utc::now());
+    }
+
+    /// True while a flooding action should be suppressed following a detected
+    /// stall's catch-up burst.
+    pub fn is_suppressing_flooding(&self) -> bool {
+        self.is_suppressing_flooding_at(Utc::now())
+    }
+
+    /// Time-injectable core of `record_event`, so the 30-second threshold can
+    /// be tested without a real 30-second sleep.
+    fn record_event_at(&self, now: DateTime<Utc>) {
+        let mut last = self
+            .last_event_at
+            .lock()
+            .expect("stall guard mutex poisoned");
+        let gap_seconds = now.signed_duration_since(*last).num_seconds();
+        *last = now;
+        if gap_seconds >= Self::STALL_GAP_SECONDS {
+            let suppress_until = now + Duration::seconds(Self::CATCHUP_GRACE_SECONDS);
+            self.suppress_flooding_until_millis.store(
+                suppress_until.timestamp_millis(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            tracing::warn!(
+                gap_seconds,
+                "reader stall detected; suppressing public flooding actions briefly on catch-up"
+            );
+        }
+    }
+
+    /// Time-injectable core of `is_suppressing_flooding`.
+    fn is_suppressing_flooding_at(&self, now: DateTime<Utc>) -> bool {
+        let until_millis = self
+            .suppress_flooding_until_millis
+            .load(std::sync::atomic::Ordering::Relaxed);
+        until_millis > 0 && now.timestamp_millis() < until_millis
+    }
 }
 
 pub struct ModerationState {
@@ -1057,6 +1133,57 @@ mod tests {
             .take_timestamp_enforcement("room", "msg")
             .unwrap()
             .is_none());
+    }
+
+    /// The exact 2026-07-31 pattern: quiet, then a >=30s gap (a stall), then a
+    /// burst of events arriving together. The guard must start suppressing
+    /// immediately on the event that CROSSES the gap threshold (that event is
+    /// itself part of the catch-up burst, so it needs covering too), stay
+    /// suppressing for the grace window, and then stop on its own.
+    #[test]
+    fn detects_a_stall_then_burst_and_suppresses_only_during_grace() {
+        let guard = StallGuard::new();
+        let t0 = at(0);
+        guard.record_event_at(t0);
+        assert!(!guard.is_suppressing_flooding_at(t0), "no stall yet");
+
+        // A 29-second gap is ordinary processing latency, not a stall.
+        let t1 = t0 + Duration::seconds(29);
+        guard.record_event_at(t1);
+        assert!(
+            !guard.is_suppressing_flooding_at(t1),
+            "29s gap is not a stall"
+        );
+
+        // A 30-second gap crosses the threshold: this IS the stall.
+        let t2 = t1 + Duration::seconds(30);
+        guard.record_event_at(t2);
+        assert!(
+            guard.is_suppressing_flooding_at(t2),
+            "the event that crosses the gap threshold is itself part of the burst"
+        );
+
+        // Still within the 30s grace window.
+        let t3 = t2 + Duration::seconds(29);
+        assert!(guard.is_suppressing_flooding_at(t3));
+
+        // Grace window has elapsed; back to normal.
+        let t4 = t2 + Duration::seconds(31);
+        assert!(!guard.is_suppressing_flooding_at(t4));
+    }
+
+    /// A busy room with sub-30-second gaps between EVERY event must never
+    /// trip the guard, or ordinary high-traffic periods would silently
+    /// disable flooding enforcement.
+    #[test]
+    fn continuous_busy_traffic_never_triggers_the_guard() {
+        let guard = StallGuard::new();
+        let mut t = at(0);
+        for _ in 0..50 {
+            t += Duration::seconds(5);
+            guard.record_event_at(t);
+            assert!(!guard.is_suppressing_flooding_at(t));
+        }
     }
 
     #[test]
