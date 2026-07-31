@@ -121,6 +121,10 @@ pub enum SelfDeleteReason {
     /// live `<img>`; until that is properly bounded a malicious embed can put
     /// arbitrary picture content in front of everyone in the room.
     EmbeddedImage,
+    /// A reaction payload that is not a single emoji. `ReactionPayload.emoji` is
+    /// unvalidated free text with no cap on size or count, so it is an
+    /// unbounded field that replicates to every peer.
+    BadReaction,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -138,6 +142,11 @@ pub struct PendingTimestampEnforcement {
     /// the ID; the warning then simply stays.
     pub warning_message_id: Option<String>,
     pub claimed_skew_seconds: i64,
+    /// The offending reaction payload, for `BadReaction` only. Needed at the
+    /// deadline: unlike a message, a reaction is identified by (message, emoji,
+    /// member) rather than by an ID of its own.
+    #[serde(default)]
+    pub reaction_emoji: Option<String>,
     pub warned_at: DateTime<Utc>,
     pub enforce_after: DateTime<Utc>,
 }
@@ -522,6 +531,32 @@ impl ModerationState {
             }
         }
         Ok(due)
+    }
+
+    /// Take the pending enforcement for `target_message_id`, if any.
+    ///
+    /// Removes and returns it in one step so a delete event and the deadline
+    /// sweep cannot both act on the same offence.
+    pub fn take_timestamp_enforcement(
+        &self,
+        room_owner: &str,
+        target_message_id: &str,
+    ) -> Result<Option<PendingTimestampEnforcement>> {
+        let key = event_key(room_owner, target_message_id);
+        let write = self.database.begin_write()?;
+        let mut table = write.open_table(PENDING_TIMESTAMP)?;
+        let existing = table.get(key.as_str())?;
+        let pending: Option<PendingTimestampEnforcement> = existing
+            .as_ref()
+            .map(|entry| serde_json::from_slice(entry.value()))
+            .transpose()?;
+        drop(existing);
+        if pending.is_some() {
+            table.remove(key.as_str())?;
+        }
+        drop(table);
+        write.commit()?;
+        Ok(pending)
     }
 
     pub fn clear_timestamp_enforcement(
@@ -985,6 +1020,45 @@ mod tests {
     /// the message alone produced one public warning per message -- WTYSSSJ7 got
     /// two 45 seconds apart on 2026-07-30. One deadline per member is enough,
     /// because the ban that follows sweeps all their messages anyway.
+    /// Compliance must be actionable the moment it happens. Taking the record
+    /// both hands it to the caller AND removes it, so the deadline sweep cannot
+    /// afterwards ban someone who already complied.
+    #[test]
+    fn taking_an_enforcement_removes_it_so_the_sweep_cannot_double_act() {
+        let dir = tempdir().unwrap();
+        let state = ModerationState::open(&dir.path().join("state.redb")).unwrap();
+        let pending = PendingTimestampEnforcement {
+            reason: SelfDeleteReason::FutureTimestamp,
+            room_owner: "room".into(),
+            member_id: "member".into(),
+            target_message_id: "msg".into(),
+            target_content_hash: "hash".into(),
+            warning_message_id: Some("notice-1".into()),
+            claimed_skew_seconds: 92,
+            reaction_emoji: None,
+            warned_at: at(0),
+            enforce_after: at(0) + Duration::seconds(120),
+        };
+        state.schedule_timestamp_enforcement(&pending).unwrap();
+
+        let taken = state.take_timestamp_enforcement("room", "msg").unwrap();
+        assert_eq!(
+            taken.expect("record must be returned").warning_message_id,
+            Some("notice-1".into()),
+            "the caller needs the notice ID to retract it"
+        );
+
+        // Gone for the sweep, so a complied-with offence cannot still ban.
+        assert!(state
+            .due_timestamp_enforcements(at(0) + Duration::seconds(600))
+            .unwrap()
+            .is_empty());
+        assert!(state
+            .take_timestamp_enforcement("room", "msg")
+            .unwrap()
+            .is_none());
+    }
+
     #[test]
     fn a_member_gets_one_warning_however_many_messages_they_post() {
         let dir = tempdir().unwrap();
@@ -997,6 +1071,7 @@ mod tests {
             target_content_hash: "hash".into(),
             warning_message_id: None,
             claimed_skew_seconds: 19812,
+            reaction_emoji: None,
             warned_at: at(0),
             enforce_after: at(0) + Duration::seconds(120),
         };
@@ -1037,6 +1112,7 @@ mod tests {
             target_content_hash: "hash".into(),
             warning_message_id: Some("warning-1".into()),
             claimed_skew_seconds: 3637,
+            reaction_emoji: None,
             warned_at: at(0),
             enforce_after: at(0) + Duration::seconds(120),
         };

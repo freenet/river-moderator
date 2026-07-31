@@ -19,7 +19,10 @@ use crate::{
     name_guard::{self, NameGuardAction},
     openai_model::OpenAiModelClient,
     policy::{decide, PolicyInput},
-    river_action::{ban_member_safely, delete_own_message, send_fixed_reply},
+    river_action::{
+        ban_member_safely, delete_own_message, reaction_is_present, send_fixed_reply,
+        send_room_message,
+    },
     river_stream::{spawn_reader, RoomEvent},
     state::{
         BanClaim, EventDisposition, LowSeverityAction, LowSeverityOutcome, ModerationState,
@@ -145,8 +148,90 @@ pub async fn run_moderator(config: Config) -> Result<()> {
                 ..
             } => {
                 state.record_deletion(&room_owner, &message_id, first_observed_at)?;
+                // Retract the notice the INSTANT its target is gone, rather
+                // than waiting for the deadline sweep. The sweep only evaluates
+                // at `enforce_after`, so a member who complied at second 10 was
+                // left staring at a live "delete this or be removed" notice for
+                // the remaining ~110 seconds -- and once their message went, it
+                // rendered as "Original message unavailable", which reads as an
+                // unexplained accusation.
+                //
+                // Taking the record removes it, so the sweep cannot also act on
+                // this offence and ban someone who already complied.
+                if let Some(pending) = state.take_timestamp_enforcement(&room_owner, &message_id)? {
+                    if let Some(warning_id) = pending.warning_message_id.as_deref() {
+                        let retract_config = config.clone();
+                        let owner = room_owner.clone();
+                        let warning = warning_id.to_owned();
+                        let member = pending.member_id.clone();
+                        tokio::spawn(async move {
+                            match delete_own_message(&retract_config.river, &owner, &warning).await
+                            {
+                                Ok(()) => tracing::info!(
+                                    member_id = %member,
+                                    "target deleted by its author; notice retracted immediately"
+                                ),
+                                Err(error) => tracing::error!(
+                                    error = %format!("{error:#}"),
+                                    "could not retract the notice after compliance"
+                                ),
+                            }
+                        });
+                    }
+                }
             }
-            RoomEvent::Reaction { .. } => {}
+            RoomEvent::Reaction {
+                room_owner,
+                message_id,
+                reactors,
+            } => {
+                if room_owner != config.room.owner_verifying_key {
+                    tracing::error!("discarded reaction for unexpected room");
+                    continue;
+                }
+                // The event carries the message's FULL current reactions map,
+                // not a delta, so every reaction on that message is re-checked
+                // on each change. That is deliberately self-healing: an
+                // offending reaction is caught even if its own event was
+                // missed, and the per-member reservation stops re-warning.
+                //
+                // Validation is pure string inspection. A text model could not
+                // judge codepoints better than arithmetic, and reactions are
+                // far too frequent to spend a model call on.
+                for (emoji, members) in &reactors {
+                    if crate::emoji::reaction_problem(emoji).is_none() {
+                        continue;
+                    }
+                    for member_id in members {
+                        // Never act on a protected identity, and never on the
+                        // moderator itself.
+                        if config
+                            .room
+                            .protected_member_ids
+                            .iter()
+                            .any(|id| id == member_id)
+                        {
+                            continue;
+                        }
+                        if let Err(error) = begin_reaction_enforcement(
+                            &config,
+                            &state,
+                            &room_owner,
+                            &message_id,
+                            emoji,
+                            member_id,
+                        )
+                        .await
+                        {
+                            tracing::error!(
+                                error = %format!("{error:#}"),
+                                member_id,
+                                "failed to start reaction enforcement"
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
     anyhow::bail!("River event channel closed")
@@ -1032,6 +1117,13 @@ async fn begin_self_delete_enforcement(
             config.policy.embedded_image_grace_seconds,
             crate::warnings::EMBEDDED_IMAGE_WARNING,
         ),
+        // Reactions take `begin_reaction_enforcement`: the notice is a
+        // top-level mention rather than a reply, because a reaction has no
+        // message of its own. Reaching here means a caller routed the wrong
+        // way; refuse rather than post a reply naming the wrong person.
+        SelfDeleteReason::BadReaction => {
+            anyhow::bail!("reaction offences must use begin_reaction_enforcement")
+        }
     };
     let pending = PendingTimestampEnforcement {
         reason,
@@ -1041,6 +1133,7 @@ async fn begin_self_delete_enforcement(
         target_content_hash: message.content_hash(),
         warning_message_id: None,
         claimed_skew_seconds: signals.claimed_clock_skew_seconds,
+        reaction_emoji: None,
         warned_at: Utc::now(),
         enforce_after: Utc::now() + Duration::seconds(grace_seconds as i64),
     };
@@ -1083,6 +1176,70 @@ async fn begin_self_delete_enforcement(
     Ok(())
 }
 
+/// Warn the members who set a non-emoji reaction, and queue the deadline.
+///
+/// The notice is a TOP-LEVEL message that `@`-mentions the offender, not a
+/// reply. A reaction has no message of its own, and replying to the reacted-to
+/// message would render the notice under an innocent party's post -- the same
+/// wrong-person attribution that makes the reaction event's `author` field a
+/// trap (it names the message author, never the reactor).
+async fn begin_reaction_enforcement(
+    config: &Config,
+    state: &ModerationState,
+    room_owner: &str,
+    message_id: &str,
+    emoji: &str,
+    member_id: &str,
+) -> Result<()> {
+    let pending = PendingTimestampEnforcement {
+        reason: SelfDeleteReason::BadReaction,
+        room_owner: room_owner.to_owned(),
+        member_id: member_id.to_owned(),
+        target_message_id: message_id.to_owned(),
+        target_content_hash: String::new(),
+        warning_message_id: None,
+        claimed_skew_seconds: 0,
+        reaction_emoji: Some(emoji.to_owned()),
+        warned_at: Utc::now(),
+        enforce_after: Utc::now()
+            + Duration::seconds(config.policy.bad_reaction_grace_seconds as i64),
+    };
+    // Reserve before posting, so a redelivered event cannot warn twice. The
+    // stream re-sends the FULL reactions map on every change to a message, so
+    // the same offending reaction is seen again on each subsequent reaction.
+    if !state.schedule_timestamp_enforcement(&pending)? {
+        return Ok(());
+    }
+    if config.service.mode != Mode::Enforce {
+        tracing::info!(
+            member_id,
+            "non-emoji reaction observed; no action outside enforce mode"
+        );
+        return Ok(());
+    }
+    // `@[name](rv:id)` binds the mention to the member ID. A bare `@nickname`
+    // resolves by NAME, and nicknames are not unique in River, so an ambiguous
+    // one degrades to plain text and the person is never notified.
+    let notice = format!(
+        "@[{member_id}](rv:{member_id}){}",
+        crate::warnings::BAD_REACTION_NOTICE
+    );
+    let warning_message_id = send_room_message(&config.river, room_owner, &notice).await?;
+    let stored = PendingTimestampEnforcement {
+        warning_message_id,
+        ..pending
+    };
+    state.clear_timestamp_enforcement(&stored.room_owner, &stored.target_message_id)?;
+    state.schedule_timestamp_enforcement(&stored)?;
+    tracing::warn!(
+        member_id = %stored.member_id,
+        enforce_after = %stored.enforce_after,
+        retractable = stored.warning_message_id.is_some(),
+        "warned a non-emoji reaction; deadline started"
+    );
+    Ok(())
+}
+
 /// Resolve future-dated messages once their deadline passes.
 ///
 /// Deleted in time -> retract the moderator's own warning, since a public notice
@@ -1099,12 +1256,27 @@ async fn timestamp_enforcement_loop(config: Arc<Config>, state: Arc<ModerationSt
             }
         };
         for pending in due {
-            let still_present = match state.message_is_current(
-                &pending.room_owner,
-                &pending.target_message_id,
-                &pending.member_id,
-                &pending.target_content_hash,
-            ) {
+            // A reaction is identified by (message, emoji, member) rather than
+            // by an ID of its own, so its presence is read fresh from the room.
+            // Message offences are answered from local state as before.
+            let presence = match (&pending.reason, pending.reaction_emoji.as_deref()) {
+                (SelfDeleteReason::BadReaction, Some(emoji)) => reaction_is_present(
+                    &config.river,
+                    &pending.room_owner,
+                    &pending.target_message_id,
+                    emoji,
+                    &pending.member_id,
+                )
+                .await
+                .map_err(|error| anyhow::anyhow!("{error:#}")),
+                _ => state.message_is_current(
+                    &pending.room_owner,
+                    &pending.target_message_id,
+                    &pending.member_id,
+                    &pending.target_content_hash,
+                ),
+            };
+            let still_present = match presence {
                 Ok(present) => present,
                 Err(error) => {
                     tracing::error!(
