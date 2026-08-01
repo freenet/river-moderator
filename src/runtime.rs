@@ -1175,10 +1175,11 @@ fn contains_embedded_image(content: &str) -> bool {
 /// real, usable member keypair, generated one-time and meant for exactly one
 /// person -- see the Invite Member modal's own notice: "Each invitation
 /// creates a unique identity and is good for exactly one person." Posting one
-/// publicly hands that identity to anyone reading the room, and if a second
-/// person also claims it, both instances collide on one identity and neither
-/// works correctly (2026-08-01: exactly this happened -- "it worked for Proud
-/// Hound so... try this").
+/// publicly hands that identity to anyone reading the room. Each claimant CAN
+/// use it -- it keeps working for all of them -- but they all share the one
+/// identity, appear as the same member, and a ban on that identity removes
+/// everyone who claimed it (2026-08-01: exactly this happened -- "it worked
+/// for Proud Hound so... try this").
 ///
 /// Matched on the literal query parameter rather than a full URL parser: the
 /// parameter is the entire signal (an ordinary message could not otherwise

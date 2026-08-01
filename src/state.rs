@@ -121,8 +121,10 @@ pub enum SelfDeleteReason {
     BadReaction,
     /// A `freenet:<key>/?invitation=<code>` link posted publicly. The code is a
     /// real, usable member keypair, generated one-time for exactly one person;
-    /// posting it in the room hands that identity to everyone reading, and a
-    /// second claimant collides with the first (neither works correctly).
+    /// posting it in the room hands that identity to everyone reading. Each
+    /// claimant CAN use it -- it does not stop working -- but they all share
+    /// the one identity, appear as the same member, and a ban on that identity
+    /// removes everyone who claimed it.
     LeakedInvitation,
 }
 
