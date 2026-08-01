@@ -36,6 +36,17 @@ pub const FUTURE_TIMESTAMP_WARNING: &str = "Your message is dated in the future,
 /// outright rather than judged case by case.
 pub const EMBEDDED_IMAGE_WARNING: &str = "Embedded images aren't allowed in this room yet. Please delete the message within 1 minute, or it will be removed along with your access. Links are fine.";
 
+/// Shown when a message contains a `?invitation=` link.
+///
+/// The link is not an inert code, it is a real one-time member keypair,
+/// generated for exactly one person -- see the Invite Member modal's own
+/// notice. Posting it publicly hands that identity to everyone reading, and a
+/// second claimant collides with the first so neither works correctly
+/// (2026-08-01: exactly this happened in the room). Most posters plainly do
+/// not realize this, so the notice explains the risk and gives the correct
+/// alternative rather than only forbidding the behavior.
+pub const LEAKED_INVITATION_WARNING: &str = "That link is a real, one-time invitation keypair, not just a code -- posting it here lets anyone claim it, and if someone already has, neither of you will be able to use it. To invite someone to a room you share with them, click their name in the member list, choose Share Invite, and pick the room. Please delete this message within 5 minutes, or it will be removed along with your access.";
+
 /// Body of the reaction notice, appended after the offender's `@` mention.
 ///
 /// Posted as a TOP-LEVEL message rather than a reply: a reaction has no message
