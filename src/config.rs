@@ -368,6 +368,10 @@ fn default_bad_reaction_grace_seconds() -> u64 {
     120
 }
 
+fn default_leaked_invitation_grace_seconds() -> u64 {
+    300
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyConfig {
@@ -398,6 +402,12 @@ pub struct PolicyConfig {
     /// Deletion window for a non-emoji reaction.
     #[serde(default = "default_bad_reaction_grace_seconds")]
     pub bad_reaction_grace_seconds: u64,
+    /// Deletion window for a publicly-posted invitation link. Longer than the
+    /// other self-delete cases: the poster likely does not realize the link is
+    /// a live keypair rather than an inert code, so they need real time to see
+    /// the notice and act, not just a moment to notice a formatting problem.
+    #[serde(default = "default_leaked_invitation_grace_seconds")]
+    pub leaked_invitation_grace_seconds: u64,
     pub warning_window_hours: u64,
     pub low_severity_grace_seconds: u64,
     pub global_action_interval_seconds: u64,

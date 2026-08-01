@@ -119,6 +119,11 @@ pub enum SelfDeleteReason {
     /// unvalidated free text with no cap on size or count, so it is an
     /// unbounded field that replicates to every peer.
     BadReaction,
+    /// A `freenet:<key>/?invitation=<code>` link posted publicly. The code is a
+    /// real, usable member keypair, generated one-time for exactly one person;
+    /// posting it in the room hands that identity to everyone reading, and a
+    /// second claimant collides with the first (neither works correctly).
+    LeakedInvitation,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

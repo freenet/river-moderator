@@ -433,6 +433,8 @@ async fn process_message(
         Some(SelfDeleteReason::FutureTimestamp)
     } else if contains_embedded_image(&message.content) {
         Some(SelfDeleteReason::EmbeddedImage)
+    } else if contains_leaked_invitation(&message.content) {
+        Some(SelfDeleteReason::LeakedInvitation)
     } else {
         None
     };
@@ -455,7 +457,14 @@ async fn process_message(
         // A future-dated message deliberately continues to classification. Its
         // text IS visible to the model, and short-circuiting would downgrade an
         // immediate severe-harm ban into a grace period.
-        if reason == SelfDeleteReason::EmbeddedImage {
+        // Same reasoning as the image case: a leaked invitation is detected by
+        // exact string match, and there is nothing for a text classifier to add
+        // by reading the surrounding sentence -- the link itself is the entire
+        // problem regardless of what the poster says about it.
+        if matches!(
+            reason,
+            SelfDeleteReason::EmbeddedImage | SelfDeleteReason::LeakedInvitation
+        ) {
             return Ok(());
         }
     }
@@ -1160,6 +1169,26 @@ fn contains_embedded_image(content: &str) -> bool {
     false
 }
 
+/// Detect a leaked River invitation link.
+///
+/// River invitation links (`freenet:<owner-key>/?invitation=<code>`) embed a
+/// real, usable member keypair, generated one-time and meant for exactly one
+/// person -- see the Invite Member modal's own notice: "Each invitation
+/// creates a unique identity and is good for exactly one person." Posting one
+/// publicly hands that identity to anyone reading the room, and if a second
+/// person also claims it, both instances collide on one identity and neither
+/// works correctly (2026-08-01: exactly this happened -- "it worked for Proud
+/// Hound so... try this").
+///
+/// Matched on the literal query parameter rather than a full URL parser: the
+/// parameter is the entire signal (an ordinary message could not otherwise
+/// contain it by coincidence), and the invitation CODE itself is exactly the
+/// secret that must never be logged or echoed back, so this deliberately does
+/// not parse or capture it.
+fn contains_leaked_invitation(content: &str) -> bool {
+    content.contains("?invitation=")
+}
+
 /// Warn the author of a message that must be self-deleted, and queue the
 /// deadline.
 ///
@@ -1180,6 +1209,10 @@ async fn begin_self_delete_enforcement(
         SelfDeleteReason::EmbeddedImage => (
             config.policy.embedded_image_grace_seconds,
             crate::warnings::EMBEDDED_IMAGE_WARNING,
+        ),
+        SelfDeleteReason::LeakedInvitation => (
+            config.policy.leaked_invitation_grace_seconds,
+            crate::warnings::LEAKED_INVITATION_WARNING,
         ),
         // Reactions take `begin_reaction_enforcement`: the notice is a
         // top-level mention rather than a reply, because a reaction has no
@@ -2056,6 +2089,45 @@ mod tests {
         ] {
             assert!(
                 !contains_embedded_image(benign),
+                "false positive on {benign:?}"
+            );
+        }
+    }
+
+    /// The real message that prompted this: an owner-VK-prefixed invitation
+    /// link, base58 code, posted openly to invite others to a game-dev room.
+    #[test]
+    fn detects_the_real_leaked_invitation() {
+        let real = "ok. it worked for Proud Hound so... try this if you want to enter room for game devel: freenet:raAqMhMG/?invitation=ThxZ8m6e6SVNEAME9qv1Af6Hqh3VRE7EGexis8SoEQEB8zk4ezfocLt2pH3fBouf5B8mjTQNxeq3AKjrtF233j3DutXzd6EBtx7Ub9rwDwpRDLAXjkTKuXDDf6faUK935K9nz4oSqkCG6L6sMT4QKEcuyZwM8ibWCnVaaCtqHANU2oqHLzE3HK693fE4Ww3SLoiZLvG6zHufG6tzP6RHgyh31mXRkGBnj4q6gxyVKzs86yj2FTYTCywXFbY7uhjsV3EnMcnVvRGHjjHk34bwREMA2cJ34cHQWMunbotRM17axrvyoDhDMWvMqd6KgGFBgKj1a5uZRvbAvazF7xpDt5weCgY7cLDAGTm7dxtJXoiucQ8VheJaboMKkY2tF2RrwyicDtRARRhhpeJXoL52JvyQqf9gsWXPxfeRv7dKcZTf4vJHmEa9WVfnhGP4jQPbfSh2nSEtDJj3zMYjzp2NybmnomRc7qc9qhPWM7rTJ58gGnjzXKg2xdAfkfe3UxtMjZpEDx3hgdibbriyMhUCPr8BMbdfYudQzoTH1rJzHc2eoimsR5ET93WokuRvzNGaD5915jqXkW5NJEVneHHQpGbZ9tsGg2xgXuzFXDdXDNgJP36KeGhkGWt2HLVM4FnJffMPD8jkavwweSD8wAGPCcKpyxzBZSLiQwbFer5kogTdp7VTg5KdHKSXHBudazxcejoKxjWvaLAePHywuhCB5FHkR7NUWrYfTtSJAiN";
+        assert!(contains_leaked_invitation(real));
+    }
+
+    #[test]
+    fn detects_leaked_invitation_link_variants() {
+        for leaked in [
+            "freenet:raAqMhMG/?invitation=abc123",
+            "join here: freenet:SomeOwnerKey/?invitation=xyz",
+            "?invitation=onlytheparam",
+        ] {
+            assert!(contains_leaked_invitation(leaked), "missed: {leaked:?}");
+        }
+    }
+
+    /// The word "invitation" alone, or the modal's own instructional text,
+    /// must never trigger this -- only the actual link parameter is the
+    /// secret; talking ABOUT invitations is exactly what the warning text
+    /// itself does, and must not re-trigger on replies quoting it.
+    #[test]
+    fn ordinary_mentions_of_invitations_are_not_flagged() {
+        for benign in [
+            "click their name in the member list, choose Share Invite",
+            "did you get my invitation to the party?",
+            "each invitation creates a unique identity",
+            "how do invitations work in River?",
+            crate::warnings::LEAKED_INVITATION_WARNING,
+        ] {
+            assert!(
+                !contains_leaked_invitation(benign),
                 "false positive on {benign:?}"
             );
         }
