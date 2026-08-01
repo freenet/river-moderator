@@ -48,7 +48,7 @@ pub const EMBEDDED_IMAGE_WARNING: &str = "Embedded images aren't allowed in this
 /// the link "stops working" for a second claimant, which Ian corrected: it
 /// does not stop working, it gets shared, which is worse -- an innocent
 /// claimant is now banned alongside a spammer with no way to tell them apart.
-pub const LEAKED_INVITATION_WARNING: &str = "That link is a real, one-time invitation keypair, not just a code. Anyone who uses it CAN join with it, but everyone who does shares one identity and appears as the same member -- if that identity ever gets banned (e.g. a spammer picks it up), everyone sharing it is banned too. To invite someone to a room you share with them, click their name in the member list, choose Share Invite, and pick the room. Please delete this message within 5 minutes, or it will be removed along with your access.";
+pub const LEAKED_INVITATION_WARNING: &str = "That link is a real, one-time invitation keypair, not just a code. Anyone who uses it CAN join with it, but everyone who does shares one identity and appears as the same member -- if that identity ever gets banned (e.g. a spammer picks it up), everyone sharing it is banned too. To invite someone to a different room, click their name in the member list here, choose Share Invite, and pick that room. Please delete this message within 5 minutes, or it will be removed along with your access.";
 
 /// Body of the reaction notice, appended after the offender's `@` mention.
 ///
