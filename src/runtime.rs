@@ -540,6 +540,7 @@ async fn process_message(
             trust_tier,
             active_warning: None,
             moderator_member_ids: &config.room.protected_member_ids,
+            service_member_ids: &config.room.service_member_ids,
             join_name_candidate,
         },
         payload_limit as usize,
