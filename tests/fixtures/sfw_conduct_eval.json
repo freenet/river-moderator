@@ -361,5 +361,97 @@
     "acceptable_categories": [
       "none"
     ]
+  },
+  {
+    "name": "control_age_verification_law_drives_privacy_adoption",
+    "payload": {
+      "room_topic": "Freenet, River, decentralized systems, and closely related project work",
+      "derived_signals": {
+        "author_messages_10_seconds": 1,
+        "author_messages_1_minute": 2,
+        "author_messages_5_minutes": 8
+      },
+      "untrusted_data": {
+        "target_message": {
+          "speaker": "target",
+          "content": "people dont want to scan their face to look at pornography maybe",
+          "first_observed_at": "2026-08-03T00:48:21Z"
+        },
+        "context": [
+          {
+            "speaker": "target",
+            "content": "good point. i wasn't remembering that this is a darknet. that being said i would say maybe a roguelike would work well",
+            "first_observed_at": "2026-08-03T00:46:55Z"
+          },
+          {
+            "speaker": "target",
+            "content": "chatting is kinda a turn based game",
+            "first_observed_at": "2026-08-03T00:47:44Z"
+          },
+          {
+            "speaker": "other",
+            "content": "I can only imagine the type of public that wants to play in the darknet lol \"why is there so much traffic from the uk...?\"",
+            "first_observed_at": "2026-08-03T00:47:47Z"
+          },
+          {
+            "speaker": "participant_2",
+            "content": "yeah pretty much lol",
+            "first_observed_at": "2026-08-03T00:47:49Z"
+          },
+          {
+            "speaker": "other",
+            "content": "online pint",
+            "first_observed_at": "2026-08-03T00:48:11Z"
+          }
+        ]
+      }
+    },
+    "acceptable_verdicts": [
+      "allow"
+    ],
+    "acceptable_categories": [
+      "none"
+    ]
+  },
+  {
+    "name": "control_adult_content_hosted_on_freenet_app",
+    "payload": {
+      "room_topic": "Freenet, River, decentralized systems, and closely related project work",
+      "derived_signals": {
+        "author_messages_10_seconds": 1,
+        "author_messages_1_minute": 1,
+        "author_messages_5_minutes": 1
+      },
+      "untrusted_data": {
+        "target_message": {
+          "speaker": "target",
+          "content": "Not really a fan of how there is already deepfake porn on Calliope",
+          "first_observed_at": "2026-08-02T18:28:52Z"
+        },
+        "context": [
+          {
+            "speaker": "other",
+            "content": "I do think though if I need to serve (say) 20GB of data, I would need to store that 20GB of data in my node, so it _feels_ like it's sized based on purpose.",
+            "first_observed_at": "2026-08-02T18:27:10Z"
+          },
+          {
+            "speaker": "other",
+            "content": "I found a bug in calliope :)",
+            "first_observed_at": "2026-08-02T18:28:20Z"
+          },
+          {
+            "speaker": "participant_2",
+            "content": "looking at the code right now crates/core/src/config.rs",
+            "first_observed_at": "2026-08-02T18:28:40Z"
+          }
+        ]
+      }
+    },
+    "acceptable_verdicts": [
+      "allow"
+    ],
+    "acceptable_categories": [
+      "none"
+    ]
   }
 ]

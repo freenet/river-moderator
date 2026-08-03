@@ -13,7 +13,7 @@ max_message_bytes = 4096
 riverctl_path = "/usr/local/bin/riverctl"
 config_dir = "/var/lib/river-moderator/river"
 node_url = "ws://127.0.0.1:7509/v1/contract/command?encodingProtocol=native"
-expected_contract_key = "4XwkMCQ4g1goJUzqVwdGgqEu2xgKHj7nge1GEXDDv4Yq"
+expected_contract_key = "9rhuzMSn4v4AugF5FhrjuB1tGP936TaP6Dp7fXijNPUL"
 ban_signing_key_file = "/run/credentials/river-moderator-eval.service/room_owner_signing_key"
 allow_remote_node = false
 max_event_bytes = 65536
