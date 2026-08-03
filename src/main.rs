@@ -248,3 +248,68 @@ impl ConfiguredModel {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every fixture under `tests/fixtures/` must deserialize into `Vec<EvalCase>`.
+    ///
+    /// `EvalCase` is `deny_unknown_fields` and its verdict/category enums are
+    /// closed, so a typo in a fixture -- a misspelled case key, a verdict that is
+    /// not in the schema, a trailing comma -- is a hard error here rather than a
+    /// runtime failure minutes into a paid evaluation run. Nothing in the test
+    /// suite touched `tests/fixtures/` before this, so a fixture edit could
+    /// previously ship without anything checking that it even parsed.
+    ///
+    /// This is deliberately the whole contract: it is deterministic and offline.
+    /// Gating CI on the model's actual verdicts would need a defined sample count
+    /// and per-case pass-rate threshold, because the classifier is stochastic;
+    /// that is a separate design question, not something to smuggle in here.
+    #[test]
+    fn every_fixture_parses_as_evaluation_cases() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let mut checked = 0usize;
+        for entry in std::fs::read_dir(&dir).expect("tests/fixtures is readable") {
+            let path = entry.expect("readable directory entry").path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let bytes = std::fs::read(&path).expect("fixture is readable");
+            let cases: Vec<EvalCase> = serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+                panic!("{} is not a valid fixture: {error}", path.display())
+            });
+            assert!(!cases.is_empty(), "{} has no cases", path.display());
+            for case in &cases {
+                assert!(
+                    !case.name.trim().is_empty(),
+                    "{} has an unnamed case",
+                    path.display()
+                );
+                assert!(
+                    !case.acceptable_verdicts.is_empty(),
+                    "{} case {} accepts no verdict, so it can never pass",
+                    path.display(),
+                    case.name
+                );
+                assert!(
+                    !case.acceptable_categories.is_empty(),
+                    "{} case {} accepts no category, so it can never pass",
+                    path.display(),
+                    case.name
+                );
+                assert!(
+                    case.payload
+                        .pointer("/untrusted_data/target_message/content")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|content| !content.is_empty()),
+                    "{} case {} has no target message content",
+                    path.display(),
+                    case.name
+                );
+            }
+            checked += 1;
+        }
+        assert!(checked > 0, "no fixtures found in {}", dir.display());
+    }
+}

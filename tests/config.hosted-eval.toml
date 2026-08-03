@@ -1,3 +1,23 @@
+# Config for `river-moderator --config <this file> evaluate <fixture>`.
+#
+# `evaluate` reads exactly one path from here: `model.api_key_file`. It never
+# opens the state database, the audit logs, or the River node, so those paths
+# only have to satisfy `Config::validate`.
+#
+# `/run/credentials/river-moderator.service/` only exists inside the running
+# unit, so an interactive run cannot read it. Point `api_key_file` at a copy you
+# own before running an evaluation, e.g.
+#
+#   install -m600 /dev/null /tmp/eval-key
+#   sudo cat /etc/river-moderator/credentials/openai_api_key > /tmp/eval-key
+#   sed 's|^api_key_file =.*|api_key_file = "/tmp/eval-key"|' \
+#     tests/config.hosted-eval.toml > /tmp/eval.toml
+#   cargo run --release -- --config /tmp/eval.toml evaluate tests/fixtures/<name>.json
+#
+# `Config::validate` requires `river.ban_signing_key_file` to be a systemd
+# credential path, so it stays pointed at the real unit even though `evaluate`
+# never reads it.
+
 [service]
 mode = "shadow"
 state_database = "/var/lib/river-moderator/state.redb"
@@ -13,8 +33,8 @@ max_message_bytes = 4096
 riverctl_path = "/usr/local/bin/riverctl"
 config_dir = "/var/lib/river-moderator/river"
 node_url = "ws://127.0.0.1:7509/v1/contract/command?encodingProtocol=native"
-expected_contract_key = "4XwkMCQ4g1goJUzqVwdGgqEu2xgKHj7nge1GEXDDv4Yq"
-ban_signing_key_file = "/run/credentials/river-moderator-eval.service/room_owner_signing_key"
+expected_contract_key = "9rhuzMSn4v4AugF5FhrjuB1tGP936TaP6Dp7fXijNPUL"
+ban_signing_key_file = "/run/credentials/river-moderator.service/room_owner_signing_key"
 allow_remote_node = false
 max_event_bytes = 65536
 
@@ -28,7 +48,7 @@ service_member_ids = ["4CLPTJPM", "NRKA4WVX"]
 provider = "open_ai"
 classifier_name = "gpt-5.6-luna"
 verifier_name = "gpt-5.6-sol"
-api_key_file = "/run/credentials/river-moderator-eval.service/openai_api_key"
+api_key_file = "/run/credentials/river-moderator.service/openai_api_key"
 request_timeout_seconds = 45
 max_response_bytes = 65536
 max_input_bytes = 12000
