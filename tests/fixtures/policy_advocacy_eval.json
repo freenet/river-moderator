@@ -1,0 +1,1238 @@
+[
+  {
+    "name": "fp_c22_petition_sign_and_email_mp",
+    "payload": {
+      "policy_version": "river-moderator-policy-v6",
+      "join_name_candidate": false,
+      "room_topic": "Freenet, River, decentralized systems, and closely related project work",
+      "policy_summary": {
+        "be_civil": true,
+        "stay_on_topic": true,
+        "severe_harm_immediate_ban": true,
+        "disruptive_behavior_warning_then_ban": true
+      },
+      "target_tenure": {
+        "trust_tier": "probationary",
+        "first_observed_at": "2026-07-30T13:12:49.576933275Z",
+        "observation_count": 4,
+        "active_days": 2,
+        "bootstrapped_as_existing": false,
+        "is_current_deputy": false
+      },
+      "active_warning": null,
+      "derived_signals": {
+        "author_messages_10_seconds": 1,
+        "author_messages_1_minute": 1,
+        "author_messages_5_minutes": 1,
+        "milliseconds_since_author_previous": null,
+        "exact_duplicate_count_5_minutes": 0,
+        "claimed_clock_skew_seconds": -4
+      },
+      "untrusted_data": {
+        "target_message": {
+          "speaker": "target",
+          "nickname": "Apiek",
+          "message_id_alias": "0b8f622cac73",
+          "content": "Hey, for any Canadians who are concerned about Bill C-22, please go to this link (https://www.ourcommons.ca/petitions/en/Petition/Details?Petition=e-7416) and sign the petition against it. It is also a good idea to voice your concern with your local MP as well...lots of emails!",
+          "author_claimed_at": "2026-08-03T13:31:21.516Z",
+          "first_observed_at": "2026-08-03T13:31:25.517862900Z",
+          "edited": false,
+          "is_moderator": false,
+          "reply_to_moderator": false,
+          "reply_to_automated_moderator": false
+        },
+        "context": [
+          {
+            "speaker": "participant_1",
+            "nickname": "sun",
+            "message_id_alias": "35cf67306284",
+            "content": "You all should check out and post on http://localhost:7509/v1/contract/web/DPZS3nmaS8XRqLufy3cq4t2DWkfG8k22gi8jcbykRzAH/",
+            "author_claimed_at": "2026-08-03T13:19:44.249Z",
+            "first_observed_at": "2026-08-03T13:19:46.455494537Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_1",
+            "nickname": "sun",
+            "message_id_alias": "e6597b5df0e1",
+            "content": "Surprisingly functional imageboard.",
+            "author_claimed_at": "2026-08-03T13:20:01.766Z",
+            "first_observed_at": "2026-08-03T13:20:04.667374432Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_2",
+            "nickname": "Ivvor",
+            "message_id_alias": "313bc315ba69",
+            "content": "Already do. Think I'm using the tripcode correctly",
+            "author_claimed_at": "2026-08-03T13:21:02.839Z",
+            "first_observed_at": "2026-08-03T13:21:06.825979034Z",
+            "edited": false,
+            "is_moderator": true,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_3",
+            "nickname": "Glitch Corvid",
+            "message_id_alias": "c2997c06b9eb",
+            "content": "joined the room",
+            "author_claimed_at": "2026-08-03T13:21:39.058Z",
+            "first_observed_at": "2026-08-03T13:21:42.950033345Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_4",
+            "nickname": "Hollow Modem",
+            "message_id_alias": "5c8c7e288ebb",
+            "content": "joined the room",
+            "author_claimed_at": "2026-08-03T13:24:10.266Z",
+            "first_observed_at": "2026-08-03T13:24:16.004568736Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_2",
+            "nickname": "Ivvor",
+            "message_id_alias": "10577172d08a",
+            "content": "I do find some of the pearl clutching amusing.",
+            "author_claimed_at": "2026-08-03T13:24:12.390Z",
+            "first_observed_at": "2026-08-03T13:24:16.929010566Z",
+            "edited": false,
+            "is_moderator": true,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_5",
+            "nickname": "dlzk",
+            "message_id_alias": "0c43055c8b83",
+            "content": "joined the room",
+            "author_claimed_at": "2026-08-03T13:25:29.596Z",
+            "first_observed_at": "2026-08-03T13:25:10.617454865Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_6",
+            "nickname": "mojoaj",
+            "message_id_alias": "c904c470af6e",
+            "content": "joined the room",
+            "author_claimed_at": "2026-08-03T13:27:15.932Z",
+            "first_observed_at": "2026-08-03T13:27:21.303015596Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_7",
+            "nickname": "Z3R0",
+            "message_id_alias": "edcb3505aaf7",
+            "content": "I'm glad humans get to offload coding. Most software is garbage and to make it not garbage would require 1000x the programmers we have now. Open source especially will really benefit from being more feature complete.",
+            "author_claimed_at": "2026-08-03T13:27:46.378Z",
+            "first_observed_at": "2026-08-03T13:27:48.714842480Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_8",
+            "nickname": "Halcyon Manifest",
+            "message_id_alias": "bf6915d06445",
+            "content": "joined the room",
+            "author_claimed_at": "2026-08-03T13:28:42.552Z",
+            "first_observed_at": "2026-08-03T13:28:49.447190587Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_9",
+            "nickname": "Halcyon Conduit",
+            "message_id_alias": "ef15e65ca61a",
+            "content": "joined the room",
+            "author_claimed_at": "2026-08-03T13:28:51.137Z",
+            "first_observed_at": "2026-08-03T13:28:54.206082142Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_10",
+            "nickname": "Ian Clarke",
+            "message_id_alias": "f1eb03c927b3",
+            "content": "I'm fairly amazed by the imageboard",
+            "author_claimed_at": "2026-08-03T13:30:00.591Z",
+            "first_observed_at": "2026-08-03T13:30:03.701216787Z",
+            "edited": false,
+            "is_moderator": true,
+            "reply_to_moderator": true,
+            "reply_to_automated_moderator": false
+          }
+        ]
+      }
+    },
+    "acceptable_verdicts": [
+      "allow"
+    ],
+    "acceptable_categories": [
+      "none"
+    ]
+  },
+  {
+    "name": "fp_c22_write_to_your_mp",
+    "payload": {
+      "policy_version": "river-moderator-policy-v6",
+      "join_name_candidate": false,
+      "room_topic": "Freenet, River, decentralized systems, and closely related project work",
+      "policy_summary": {
+        "be_civil": true,
+        "stay_on_topic": true,
+        "severe_harm_immediate_ban": true,
+        "disruptive_behavior_warning_then_ban": true
+      },
+      "target_tenure": {
+        "trust_tier": "probationary",
+        "first_observed_at": "2026-07-26T05:43:10.735114501Z",
+        "observation_count": 3,
+        "active_days": 1,
+        "bootstrapped_as_existing": false,
+        "is_current_deputy": false
+      },
+      "active_warning": null,
+      "derived_signals": {
+        "author_messages_10_seconds": 1,
+        "author_messages_1_minute": 1,
+        "author_messages_5_minutes": 3,
+        "milliseconds_since_author_previous": 96804,
+        "exact_duplicate_count_5_minutes": 0,
+        "claimed_clock_skew_seconds": -15
+      },
+      "untrusted_data": {
+        "target_message": {
+          "speaker": "target",
+          "nickname": "Plasma Osprey",
+          "message_id_alias": "037bf2357500",
+          "content": "No one to review huh? If your in canada, send a letter to your MP about Bill C22 aka that spying piece of shit law",
+          "author_claimed_at": "2026-07-26T05:44:41.900Z",
+          "first_observed_at": "2026-07-26T05:44:57.407610686Z",
+          "edited": false,
+          "is_moderator": false,
+          "reply_to_moderator": false,
+          "reply_to_automated_moderator": false
+        },
+        "context": [
+          {
+            "speaker": "participant_1",
+            "nickname": "Logic Vector",
+            "message_id_alias": "6a3f92a6f269",
+            "content": "Just try kimi mate other than getting stuck in a endless loop it performs better than Claude fable 5 ",
+            "author_claimed_at": "2026-07-26T05:40:58.670Z",
+            "first_observed_at": "2026-07-26T05:41:21.055249044Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_1",
+            "nickname": "Logic Vector",
+            "message_id_alias": "97129ed9d1c8",
+            "content": "Agree but I kind of feel pain seeing finance bro earning more while doing absolutely shit no I might deiced to get a finance degree and machine learning degree then start printing money as they say you can't beat them join them",
+            "author_claimed_at": "2026-07-26T05:42:41.470Z",
+            "first_observed_at": "2026-07-26T05:42:53.836543140Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "target",
+            "nickname": "Plasma Osprey",
+            "message_id_alias": "1393623e0d59",
+            "content": "joined the room",
+            "author_claimed_at": "2026-07-26T05:43:07.279Z",
+            "first_observed_at": "2026-07-26T05:43:10.735114501Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "target",
+            "nickname": "Plasma Osprey",
+            "message_id_alias": "4eb0d4a5a376",
+            "content": "hello",
+            "author_claimed_at": "2026-07-26T05:43:16.894Z",
+            "first_observed_at": "2026-07-26T05:43:20.602652773Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_2",
+            "nickname": "Onyx Anchor",
+            "message_id_alias": "864ae5ae9ec3",
+            "content": "joined the room",
+            "author_claimed_at": "2026-07-26T05:43:18.020Z",
+            "first_observed_at": "2026-07-26T05:43:36.195756992Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_3",
+            "nickname": "Acid Havoc",
+            "message_id_alias": "6bb50e8e2a7f",
+            "content": "joined the room",
+            "author_claimed_at": "2026-07-26T05:43:52.964Z",
+            "first_observed_at": "2026-07-26T05:43:55.571190999Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_1",
+            "nickname": "Logic Vector",
+            "message_id_alias": "695a5bb38162",
+            "content": "You should give kimi a try its a good model ",
+            "author_claimed_at": "2026-07-26T05:43:38.911Z",
+            "first_observed_at": "2026-07-26T05:43:59.017185041Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_1",
+            "nickname": "Logic Vector",
+            "message_id_alias": "d584adf4d59e",
+            "content": "Hello mate",
+            "author_claimed_at": "2026-07-26T05:43:49.931Z",
+            "first_observed_at": "2026-07-26T05:44:10.376081211Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_4",
+            "nickname": "Raina Mochii",
+            "message_id_alias": "18ded9f09ad1",
+            "content": "joined the room",
+            "author_claimed_at": "2026-07-26T05:44:19.351Z",
+            "first_observed_at": "2026-07-26T05:44:22.479145994Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_5",
+            "nickname": "Flux Bulwark",
+            "message_id_alias": "1112c7f8b3ce",
+            "content": "anyone come here from watching the freenet youtube vid? :D ",
+            "author_claimed_at": "2026-07-26T05:44:30.252Z",
+            "first_observed_at": "2026-07-26T05:44:35.824667283Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_3",
+            "nickname": "Acid Havoc",
+            "message_id_alias": "7fd7278f234f",
+            "content": "Ya",
+            "author_claimed_at": "2026-07-26T05:44:42.283Z",
+            "first_observed_at": "2026-07-26T05:44:53.335288341Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_6",
+            "nickname": "Shindig",
+            "message_id_alias": "0eb4c7177531",
+            "content": "aye",
+            "author_claimed_at": "2026-07-26T05:44:50.306Z",
+            "first_observed_at": "2026-07-26T05:44:55.892126300Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          }
+        ]
+      }
+    },
+    "acceptable_verdicts": [
+      "allow"
+    ],
+    "acceptable_categories": [
+      "none"
+    ]
+  },
+  {
+    "name": "fp_chat_control_veto_campaign",
+    "payload": {
+      "policy_version": "river-moderator-policy-v6",
+      "join_name_candidate": false,
+      "room_topic": "Freenet, River, decentralized systems, and closely related project work",
+      "policy_summary": {
+        "be_civil": true,
+        "stay_on_topic": true,
+        "severe_harm_immediate_ban": true,
+        "disruptive_behavior_warning_then_ban": true
+      },
+      "target_tenure": {
+        "trust_tier": "probationary",
+        "first_observed_at": "2026-07-26T07:55:31.903608498Z",
+        "observation_count": 2,
+        "active_days": 1,
+        "bootstrapped_as_existing": false,
+        "is_current_deputy": false
+      },
+      "active_warning": null,
+      "derived_signals": {
+        "author_messages_10_seconds": 1,
+        "author_messages_1_minute": 1,
+        "author_messages_5_minutes": 1,
+        "milliseconds_since_author_previous": 470454,
+        "exact_duplicate_count_5_minutes": 0,
+        "claimed_clock_skew_seconds": -3
+      },
+      "untrusted_data": {
+        "target_message": {
+          "speaker": "target",
+          "nickname": "RPJ",
+          "message_id_alias": "d9af9a4fd408",
+          "content": "My friends, do do your part to veto Chat Control 2.0 in the European Union. \nhttps://fightchatcontrol.eu/\nThank you!",
+          "author_claimed_at": "2026-07-26T08:03:18.741Z",
+          "first_observed_at": "2026-07-26T08:03:22.358578811Z",
+          "edited": false,
+          "is_moderator": false,
+          "reply_to_moderator": false,
+          "reply_to_automated_moderator": false
+        },
+        "context": [
+          {
+            "speaker": "target",
+            "nickname": "RPJ",
+            "message_id_alias": "ca57c4a16301",
+            "content": "joined the room",
+            "author_claimed_at": "2026-07-26T07:55:27.466Z",
+            "first_observed_at": "2026-07-26T07:55:31.903608498Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_1",
+            "nickname": "GeBe",
+            "message_id_alias": "7a996f8191f4",
+            "content": "joined the room",
+            "author_claimed_at": "2026-07-26T08:01:30.136Z",
+            "first_observed_at": "2026-07-26T08:01:48.539773912Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_2",
+            "nickname": "Phantom Larvik",
+            "message_id_alias": "d0f83f6b4248",
+            "content": "joined the room",
+            "author_claimed_at": "2026-07-26T08:01:51.026Z",
+            "first_observed_at": "2026-07-26T08:02:08.284311246Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_3",
+            "nickname": "Bitwise Havoc",
+            "message_id_alias": "2cce42d54e15",
+            "content": "Hello ",
+            "author_claimed_at": "2026-07-26T08:01:16.906Z",
+            "first_observed_at": "2026-07-26T08:02:09.988816712Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_3",
+            "nickname": "Bitwise Havoc",
+            "message_id_alias": "423a331b1135",
+            "content": "Wtf",
+            "author_claimed_at": "2026-07-26T08:01:34.366Z",
+            "first_observed_at": "2026-07-26T08:02:09.988851591Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_4",
+            "nickname": "Binary Specter",
+            "message_id_alias": "8be219a17969",
+            "content": "joined the room",
+            "author_claimed_at": "2026-07-26T08:02:02.321Z",
+            "first_observed_at": "2026-07-26T08:02:22.974993630Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_5",
+            "nickname": "AndyGer",
+            "message_id_alias": "d36d757287ed",
+            "content": "good morning from germany (10:02 here)",
+            "author_claimed_at": "2026-07-26T08:02:12.703Z",
+            "first_observed_at": "2026-07-26T08:02:26.782635985Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_6",
+            "nickname": "Blaze Forge",
+            "message_id_alias": "aec56d2e9a8c",
+            "content": "joined the room",
+            "author_claimed_at": "2026-07-26T08:02:21.301Z",
+            "first_observed_at": "2026-07-26T08:02:41.601713034Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_7",
+            "nickname": "Obsidian Nightjar",
+            "message_id_alias": "1e6f513f0d22",
+            "content": "joined the room",
+            "author_claimed_at": "2026-07-26T08:02:37.908Z",
+            "first_observed_at": "2026-07-26T08:02:48.866286993Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_3",
+            "nickname": "Bitwise Havoc",
+            "message_id_alias": "c3e29733d81f",
+            "content": "Fuck you ",
+            "author_claimed_at": "2026-07-26T08:02:33.837Z",
+            "first_observed_at": "2026-07-26T08:02:49.896567294Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_3",
+            "nickname": "Bitwise Havoc",
+            "message_id_alias": "1361475645cb",
+            "content": "From india ",
+            "author_claimed_at": "2026-07-26T08:02:44.662Z",
+            "first_observed_at": "2026-07-26T08:03:03.381324815Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_8",
+            "nickname": "Cache Payload",
+            "message_id_alias": "8a79d1e2c36d",
+            "content": "joined the room",
+            "author_claimed_at": "2026-07-26T08:02:50.316Z",
+            "first_observed_at": "2026-07-26T08:03:03.381364785Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_8",
+            "nickname": "Cache Payload",
+            "message_id_alias": "1bb55ad0644f",
+            "content": "Hello from France :)",
+            "author_claimed_at": "2026-07-26T08:03:05.249Z",
+            "first_observed_at": "2026-07-26T08:03:17.638676638Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          }
+        ]
+      }
+    },
+    "acceptable_verdicts": [
+      "allow"
+    ],
+    "acceptable_categories": [
+      "none"
+    ]
+  },
+  {
+    "name": "control_c22_discussion_already_allowed",
+    "payload": {
+      "policy_version": "river-moderator-policy-v6",
+      "join_name_candidate": false,
+      "room_topic": "Freenet, River, decentralized systems, and closely related project work",
+      "policy_summary": {
+        "be_civil": true,
+        "stay_on_topic": true,
+        "severe_harm_immediate_ban": true,
+        "disruptive_behavior_warning_then_ban": true
+      },
+      "target_tenure": {
+        "trust_tier": "probationary",
+        "first_observed_at": "2026-07-30T14:16:43.966782432Z",
+        "observation_count": 2,
+        "active_days": 1,
+        "bootstrapped_as_existing": false,
+        "is_current_deputy": false
+      },
+      "active_warning": null,
+      "derived_signals": {
+        "author_messages_10_seconds": 1,
+        "author_messages_1_minute": 1,
+        "author_messages_5_minutes": 1,
+        "milliseconds_since_author_previous": 616785,
+        "exact_duplicate_count_5_minutes": 0,
+        "claimed_clock_skew_seconds": -2
+      },
+      "untrusted_data": {
+        "target_message": {
+          "speaker": "target",
+          "nickname": "Airlock Holmes",
+          "message_id_alias": "c5181052b911",
+          "content": "Hello, everyone! Trying out Freenet, since Canada is about to do some draconian stuff to both the internet and client computers with bill C-22, the \"Lawful Access\" bill. Signal and Tailscale, two tools I rely on, are just going to leave Canada. Argh. What a mess.",
+          "author_claimed_at": "2026-07-30T14:26:57.768Z",
+          "first_observed_at": "2026-07-30T14:27:00.752420977Z",
+          "edited": false,
+          "is_moderator": false,
+          "reply_to_moderator": false,
+          "reply_to_automated_moderator": false
+        },
+        "context": [
+          {
+            "speaker": "target",
+            "nickname": "Airlock Holmes",
+            "message_id_alias": "68d19dba2bdf",
+            "content": "joined the room",
+            "author_claimed_at": "2026-07-30T14:16:40.605Z",
+            "first_observed_at": "2026-07-30T14:16:43.966782432Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_1",
+            "nickname": "ofansifkapital-xmpp",
+            "message_id_alias": "8350ca5bed5a",
+            "content": "late 90s were peak",
+            "author_claimed_at": "2026-07-30T14:24:15.553127823Z",
+            "first_observed_at": "2026-07-30T14:24:21.291503555Z",
+            "edited": false,
+            "is_moderator": true,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_1",
+            "nickname": "ofansifkapital-xmpp",
+            "message_id_alias": "bc7ff83a3cfc",
+            "content": "its over now",
+            "author_claimed_at": "2026-07-30T14:24:20.203812012Z",
+            "first_observed_at": "2026-07-30T14:24:26.143429327Z",
+            "edited": false,
+            "is_moderator": true,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_2",
+            "nickname": "Ian Clarke",
+            "message_id_alias": "eef9937d8c8e",
+            "content": "We're bringing back the 90s internet and we're not apologizing for it",
+            "author_claimed_at": "2026-07-30T14:24:32.811Z",
+            "first_observed_at": "2026-07-30T14:24:36.749483027Z",
+            "edited": false,
+            "is_moderator": true,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_3",
+            "nickname": "Sancar",
+            "message_id_alias": "d933d4ed5c2e",
+            "content": "joined the room",
+            "author_claimed_at": "2026-07-30T14:24:48.206Z",
+            "first_observed_at": "2026-07-30T14:24:51.565815098Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_1",
+            "nickname": "ofansifkapital-xmpp",
+            "message_id_alias": "de569a5bf096",
+            "content": "/me afk",
+            "author_claimed_at": "2026-07-30T14:24:50.210006471Z",
+            "first_observed_at": "2026-07-30T14:24:56.434531868Z",
+            "edited": false,
+            "is_moderator": true,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_4",
+            "nickname": "NTrink",
+            "message_id_alias": "dff03f60a884",
+            "content": "there is some web revivel stuff but problem is its all kinda wierd people corners of the internet so hard to convince people to hang there",
+            "author_claimed_at": "2026-07-30T14:24:59.539Z",
+            "first_observed_at": "2026-07-30T14:25:02.870301304Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": true,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_5",
+            "nickname": "SUB0PT1MAL",
+            "message_id_alias": "f71396f4e643",
+            "content": "dont worry, proper whipping timing and technique will award you Altman coins you can spend to get realwaterTM by Nestle",
+            "author_claimed_at": "2026-07-30T14:25:08.206Z",
+            "first_observed_at": "2026-07-30T14:25:11.447375290Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_6",
+            "nickname": "SirQuacksALot",
+            "message_id_alias": "b7e6a6b42c6e",
+            "content": "joined the room",
+            "author_claimed_at": "2026-07-30T14:25:30.073Z",
+            "first_observed_at": "2026-07-30T14:25:34.107895850Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_7",
+            "nickname": "Evil Frank Sinatra",
+            "message_id_alias": "2308a7450115",
+            "content": "joined the room",
+            "author_claimed_at": "2026-07-30T14:25:33.735Z",
+            "first_observed_at": "2026-07-30T14:25:40.630196928Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_4",
+            "nickname": "NTrink",
+            "message_id_alias": "c4f12bc99ba5",
+            "content": "I feel like I would have felt very much at home at old style forums",
+            "author_claimed_at": "2026-07-30T14:25:58.891Z",
+            "first_observed_at": "2026-07-30T14:26:02.662205275Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_8",
+            "nickname": "Glitch Flywheel",
+            "message_id_alias": "f7376dda477b",
+            "content": "joined the room",
+            "author_claimed_at": "2026-07-30T14:26:17.108Z",
+            "first_observed_at": "2026-07-30T14:26:23.910143194Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_7",
+            "nickname": "Evil Frank Sinatra",
+            "message_id_alias": "3220519ac1b9",
+            "content": "I'm currently watching the video from 5 days ago about freenet, and this stuff is kind awesome",
+            "author_claimed_at": "2026-07-30T14:26:53.700Z",
+            "first_observed_at": "2026-07-30T14:26:56.405239488Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          }
+        ]
+      }
+    },
+    "acceptable_verdicts": [
+      "allow"
+    ],
+    "acceptable_categories": [
+      "none"
+    ]
+  },
+  {
+    "name": "catch_pirate_party_recruitment",
+    "payload": {
+      "policy_version": "river-moderator-policy-v6",
+      "join_name_candidate": false,
+      "room_topic": "Freenet, River, decentralized systems, and closely related project work",
+      "policy_summary": {
+        "be_civil": true,
+        "stay_on_topic": true,
+        "severe_harm_immediate_ban": true,
+        "disruptive_behavior_warning_then_ban": true
+      },
+      "target_tenure": {
+        "trust_tier": "probationary",
+        "first_observed_at": "2026-07-26T08:44:08.443809507Z",
+        "observation_count": 2,
+        "active_days": 1,
+        "bootstrapped_as_existing": false,
+        "is_current_deputy": false
+      },
+      "active_warning": null,
+      "derived_signals": {
+        "author_messages_10_seconds": 1,
+        "author_messages_1_minute": 1,
+        "author_messages_5_minutes": 1,
+        "milliseconds_since_author_previous": null,
+        "exact_duplicate_count_5_minutes": 0,
+        "claimed_clock_skew_seconds": -13
+      },
+      "untrusted_data": {
+        "target_message": {
+          "speaker": "target",
+          "nickname": "Monsoon Rune",
+          "message_id_alias": "91ce000f2a11",
+          "content": "Join your local Pirate Parties. Help us put an end to tyrany of bigtech and christian-democrats in EU parliament.\nhttps://europeanpirates.eu/\nhttps://pp-international.net/pirate-parties/",
+          "author_claimed_at": "2026-07-26T10:48:25.544Z",
+          "first_observed_at": "2026-07-26T10:48:38.936984308Z",
+          "edited": false,
+          "is_moderator": false,
+          "reply_to_moderator": false,
+          "reply_to_automated_moderator": false
+        },
+        "context": [
+          {
+            "speaker": "participant_1",
+            "nickname": "cench",
+            "message_id_alias": "1975aec07618",
+            "content": "joined the room",
+            "author_claimed_at": "2026-07-26T10:46:25.591Z",
+            "first_observed_at": "2026-07-26T10:46:41.557179380Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_2",
+            "nickname": "Carbon Sentinel",
+            "message_id_alias": "aaa2731a1c48",
+            "content": "Hi",
+            "author_claimed_at": "2026-07-26T10:46:27.517Z",
+            "first_observed_at": "2026-07-26T10:46:41.557210161Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_3",
+            "nickname": "Hex Tunnel",
+            "message_id_alias": "046f8f22a445",
+            "content": "ultimately there will need to be specialized servers for certain applications even if its in peer to peer networks",
+            "author_claimed_at": "2026-07-26T10:46:29.660Z",
+            "first_observed_at": "2026-07-26T10:46:42.997596815Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_4",
+            "nickname": "ofansifkapital-xmpp",
+            "message_id_alias": "a1331c081bcd",
+            "content": "@sun:\n> oh my god Ian I just saw the AI slop video about the conjecture on your YT, you gotta stop with these lmao\n\nwhich one?  link?",
+            "author_claimed_at": "2026-07-26T10:46:48.989318223Z",
+            "first_observed_at": "2026-07-26T10:46:53.562893923Z",
+            "edited": false,
+            "is_moderator": true,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_5",
+            "nickname": "Plasma Foundry",
+            "message_id_alias": "6fb14bc52668",
+            "content": "serverless , but you can start and use indexer for message layer and faster loading , also check idea with geohashes derived into bitcoin addresses in discovery module",
+            "author_claimed_at": "2026-07-26T10:46:59.442Z",
+            "first_observed_at": "2026-07-26T10:47:08.357905143Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_6",
+            "nickname": "Ivvor",
+            "message_id_alias": "2a3e93e5e70b",
+            "content": "Anonymity is a thorny issue. The original Freenet was anonymity first, but that was based on the tech of the time. True anonymity is very, very hard. Real anonymity requires a lot of performance compromises at least so the focus is on decentralisation, which is still hard, but at least it can be usable. Better levels of anonymity can, in theory, be built upon that later.\n\nFor most casual users, in relatively safe countries, Freenet is probably anonymous enough for them for now.",
+            "author_claimed_at": "2026-07-26T10:47:40.333Z",
+            "first_observed_at": "2026-07-26T10:47:43.390431425Z",
+            "edited": false,
+            "is_moderator": true,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_7",
+            "nickname": "Halcyon Cobra",
+            "message_id_alias": "3e99469f8bf9",
+            "content": "joined the room",
+            "author_claimed_at": "2026-07-26T10:47:23.569Z",
+            "first_observed_at": "2026-07-26T10:47:44.929122598Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_8",
+            "nickname": "Feral Socket",
+            "message_id_alias": "57c3e856af51",
+            "content": "Im surprised this chat is so active, even though its pretty slow",
+            "author_claimed_at": "2026-07-26T10:47:32.934Z",
+            "first_observed_at": "2026-07-26T10:47:48.580980756Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_9",
+            "nickname": "Iridium Relay",
+            "message_id_alias": "ee4bbc40bdcb",
+            "content": "joined the room",
+            "author_claimed_at": "2026-07-26T10:48:02.903Z",
+            "first_observed_at": "2026-07-26T10:48:17.126419837Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_10",
+            "nickname": "AndyGer",
+            "message_id_alias": "984e330a8273",
+            "content": "whis is for people who care, not for those who are lazy and seek short-cuts to even more lazyness .. ",
+            "author_claimed_at": "2026-07-26T10:48:05.428Z",
+            "first_observed_at": "2026-07-26T10:48:17.126438267Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_11",
+            "nickname": "ObsidianPixel",
+            "message_id_alias": "a5ead1c5dc18",
+            "content": "Not if your network base is large enough with thousands of users.",
+            "author_claimed_at": "2026-07-26T10:48:22.903Z",
+            "first_observed_at": "2026-07-26T10:48:33.777952869Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_9",
+            "nickname": "Iridium Relay",
+            "message_id_alias": "19af3ad04ff4",
+            "content": "Hi!",
+            "author_claimed_at": "2026-07-26T10:48:25.018Z",
+            "first_observed_at": "2026-07-26T10:48:36.847858524Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          }
+        ]
+      }
+    },
+    "acceptable_verdicts": [
+      "nudge_conduct",
+      "warn_disruptive",
+      "ban_severe_harm",
+      "needs_human_review"
+    ],
+    "acceptable_categories": [
+      "off_topic",
+      "conduct",
+      "incivility",
+      "personal_attack",
+      "harassment",
+      "spam",
+      "flooding",
+      "prompt_injection",
+      "hate",
+      "privacy",
+      "self_promotion",
+      "misinformation",
+      "other"
+    ]
+  },
+  {
+    "name": "catch_pirate_party_recruitment_repeat",
+    "payload": {
+      "policy_version": "river-moderator-policy-v6",
+      "join_name_candidate": false,
+      "room_topic": "Freenet, River, decentralized systems, and closely related project work",
+      "policy_summary": {
+        "be_civil": true,
+        "stay_on_topic": true,
+        "severe_harm_immediate_ban": true,
+        "disruptive_behavior_warning_then_ban": true
+      },
+      "target_tenure": {
+        "trust_tier": "probationary",
+        "first_observed_at": "2026-07-26T08:44:08.443809507Z",
+        "observation_count": 3,
+        "active_days": 1,
+        "bootstrapped_as_existing": false,
+        "is_current_deputy": false
+      },
+      "active_warning": null,
+      "derived_signals": {
+        "author_messages_10_seconds": 1,
+        "author_messages_1_minute": 1,
+        "author_messages_5_minutes": 1,
+        "milliseconds_since_author_previous": null,
+        "exact_duplicate_count_5_minutes": 0,
+        "claimed_clock_skew_seconds": -14
+      },
+      "untrusted_data": {
+        "target_message": {
+          "speaker": "target",
+          "nickname": "Monsoon Rune",
+          "message_id_alias": "06427bb8e904",
+          "content": "Join your local Pirate Parties. Help us put an end to tyrany of bigtech and christian-democrats in EU parliament.\nhttps://europeanpirates.eu/\nhttps://pp-international.net/pirate-parties/",
+          "author_claimed_at": "2026-07-26T11:41:31.657Z",
+          "first_observed_at": "2026-07-26T11:41:46.241377821Z",
+          "edited": false,
+          "is_moderator": false,
+          "reply_to_moderator": false,
+          "reply_to_automated_moderator": false
+        },
+        "context": [
+          {
+            "speaker": "participant_1",
+            "nickname": "Khallisa",
+            "message_id_alias": "da71276601bc",
+            "content": "joined the room",
+            "author_claimed_at": "2026-07-26T11:40:31.303Z",
+            "first_observed_at": "2026-07-26T11:40:48.770025766Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_2",
+            "nickname": "Neutron Keystone",
+            "message_id_alias": "62801662be05",
+            "content": "joined the room",
+            "author_claimed_at": "2026-07-26T11:40:40.352Z",
+            "first_observed_at": "2026-07-26T11:40:48.770049532Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_3",
+            "nickname": "Phantom Peregrine",
+            "message_id_alias": "eb59a36db88f",
+            "content": "Oh hi Mark",
+            "author_claimed_at": "2026-07-26T11:40:30.598Z",
+            "first_observed_at": "2026-07-26T11:40:56.081303129Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_4",
+            "nickname": "Midnight Serpent",
+            "message_id_alias": "ceb5aafacf7d",
+            "content": "Where does the tbs of data sit? One big reason centralised systems went gangbusters is the simple fact that a lot of capital is required to even store data. ",
+            "author_claimed_at": "2026-07-26T11:40:40.353Z",
+            "first_observed_at": "2026-07-26T11:40:58.592534015Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_5",
+            "nickname": "Mark Zuckerberg",
+            "message_id_alias": "d912bd45ff85",
+            "content": "Ofcoz, I'm hiding in my $million underground bunker while typing this 😉",
+            "author_claimed_at": "2026-07-26T11:40:50.427Z",
+            "first_observed_at": "2026-07-26T11:41:06.421493679Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_6",
+            "nickname": "Onyx Console",
+            "message_id_alias": "356ef8d9f66d",
+            "content": "if this is the real Mark Zuckerberg.. please help. my cats need food to eat",
+            "author_claimed_at": "2026-07-26T11:40:50.606Z",
+            "first_observed_at": "2026-07-26T11:41:08.991001650Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_7",
+            "nickname": "Ivvor",
+            "message_id_alias": "db557e1beafc",
+            "content": "I miss Gnutella. The network could be a broken mess, but I loved the tech",
+            "author_claimed_at": "2026-07-26T11:41:04.324Z",
+            "first_observed_at": "2026-07-26T11:41:08.991040594Z",
+            "edited": false,
+            "is_moderator": true,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_2",
+            "nickname": "Neutron Keystone",
+            "message_id_alias": "c05d34c589df",
+            "content": "Вітаю!",
+            "author_claimed_at": "2026-07-26T11:41:01.054Z",
+            "first_observed_at": "2026-07-26T11:41:15.481535518Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_8",
+            "nickname": "Zero Kernel",
+            "message_id_alias": "284e51c94ebf",
+            "content": "joined the room",
+            "author_claimed_at": "2026-07-26T11:41:11.776Z",
+            "first_observed_at": "2026-07-26T11:41:20.653919044Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_9",
+            "nickname": "sun",
+            "message_id_alias": "bfceb66f9ab5",
+            "content": "A Usenet-style threaded forum would be much better on Freenet. Someone needs to work on that.",
+            "author_claimed_at": "2026-07-26T11:41:18.607Z",
+            "first_observed_at": "2026-07-26T11:41:22.353494931Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": true,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_5",
+            "nickname": "Mark Zuckerberg",
+            "message_id_alias": "b5d3ecc430b8",
+            "content": "I did not hit her! I did not!!",
+            "author_claimed_at": "2026-07-26T11:41:18.866Z",
+            "first_observed_at": "2026-07-26T11:41:33.922580711Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          },
+          {
+            "speaker": "participant_10",
+            "nickname": "Lentil",
+            "message_id_alias": "8decdeedca7e",
+            "content": "UDP hole punching + relay as possible fallback, I assume",
+            "author_claimed_at": "2026-07-26T11:41:41.890Z",
+            "first_observed_at": "2026-07-26T11:41:45.126227669Z",
+            "edited": false,
+            "is_moderator": false,
+            "reply_to_moderator": false,
+            "reply_to_automated_moderator": false
+          }
+        ]
+      }
+    },
+    "acceptable_verdicts": [
+      "nudge_conduct",
+      "warn_disruptive",
+      "ban_severe_harm",
+      "needs_human_review"
+    ],
+    "acceptable_categories": [
+      "off_topic",
+      "conduct",
+      "incivility",
+      "personal_attack",
+      "harassment",
+      "spam",
+      "flooding",
+      "prompt_injection",
+      "hate",
+      "privacy",
+      "self_promotion",
+      "misinformation",
+      "other"
+    ]
+  }
+]
