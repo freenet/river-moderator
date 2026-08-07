@@ -36,27 +36,33 @@ struct BanResponse {
     banned_member_id: String,
 }
 
-/// Distinguishing part of riverctl's refusal when a reply target has aged out
-/// of the room's bounded `recent_messages` buffer.
+/// Distinguishing part of riverctl's refusal when it cannot see a reply
+/// target.
 ///
 /// Verbatim from `river/cli/src/api.rs`: "Target message not found in recent
 /// messages. Cannot reply to expired messages via CLI." Only the stable half
 /// is matched, so re-wording around it is tolerated.
 const EXPIRED_REPLY_TARGET_MARKER: &str = "Cannot reply to expired messages";
 
-/// True when a failed reply failed *because its target expired*, so the
-/// notice can be re-posted at top level instead of being dropped.
+/// True when a reply failed because riverctl could not find its target.
 ///
-/// This deliberately does NOT match reply failures in general. A timeout or a
-/// transport error may have landed the reply anyway, and re-posting one of
-/// those would double-post; an expired target means riverctl refused before
-/// sending, so the fallback cannot duplicate anything.
+/// Despite the wording, this covers TWO cases and cannot separate them:
+/// riverctl resolves the target through `display_messages()`, which filters
+/// DELETED messages as well as ones that aged out of the bounded
+/// `recent_messages` buffer. So "expired" here means "gone", which may well
+/// mean the member deleted it. That ambiguity is why the notice is dropped
+/// rather than re-posted at top level -- see the call site in
+/// `runtime::warning_loop`.
 ///
-/// Matching another tool's message text can rot: if riverctl re-words this
-/// past the marker, the fallback stops engaging and behaviour reverts to
-/// dropping the notice with an error logged, which is exactly today's
-/// behaviour rather than a new failure. `expired_reply_target_marker_matches_riverctl`
-/// pins the current wording.
+/// Used only to classify the log, so callers can count an unavoidable drop
+/// apart from a genuinely broken action path. It deliberately does NOT match
+/// reply failures in general: a timeout or transport error may have landed
+/// the reply anyway, and must not be reported as a benign drop.
+///
+/// Matching another tool's message text can rot. If riverctl re-words past
+/// the marker, these drops simply go back to being logged as generic
+/// failures -- noisier, never wrong.
+/// `expired_reply_target_marker_matches_riverctl` pins the current wording.
 pub fn is_expired_reply_target(error: &anyhow::Error) -> bool {
     format!("{error:#}").contains(EXPIRED_REPLY_TARGET_MARKER)
 }

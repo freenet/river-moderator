@@ -122,12 +122,19 @@ pub async fn run_moderator(config: Config) -> Result<()> {
                 if disposition == EventDisposition::Duplicate {
                     continue;
                 }
-                // Only NEW messages confirm a stall. A forced reconnect
-                // re-delivers recent messages, but those are duplicates that
-                // keep their original `first_observed_at`, so they compress
-                // nothing -- counting them made ordinary quiet look like a
-                // catch-up burst 634 times a day.
-                stall_guard.record_new_message();
+                // Only a message we have never seen can compress observation
+                // times, so only `New` confirms a stall -- `Edited` reuses the
+                // stored `first_observed_at` (see `record_message`) and would
+                // arm suppression for edits made after an ordinary lull.
+                //
+                // Timed on the message's own `first_observed_at`, the reader's
+                // wire-arrival stamp, NOT on this loop's dequeue time: the
+                // permit await below and inline reaction enforcement can both
+                // stall this loop for tens of seconds, which would otherwise
+                // spread a drain's measurements and disarm the guard mid-drain.
+                if disposition == EventDisposition::New {
+                    stall_guard.record_new_message(message.first_observed_at);
+                }
                 let permit = concurrency.clone().acquire_owned().await?;
                 let task_config = config.clone();
                 let task_state = state.clone();
@@ -271,14 +278,29 @@ pub async fn run_moderator(config: Config) -> Result<()> {
 /// -- the timeout fired 140 times in 24h, overwhelmingly overnight, i.e.
 /// almost every firing was a quiet room rather than a stall.
 ///
-/// That is left as-is deliberately. Reconnecting is the only recovery we have
-/// from a silent stall, and a needless reconnect is cheap and safe: riverctl
-/// re-delivers recent messages, `record_message` discards them as duplicates,
-/// and no event is lost. Raising the timeout would trade the one recovery
-/// path for quieter logs. The cost that IS real is 140 full room re-fetches a
-/// day against the node; `river-moderator-health.sh` now counts these
-/// reconnects, so the cadence can be tuned against data rather than guessed.
-/// Logged at WARN, not ERROR: on this room it is a routine event.
+/// The timeout is left as-is deliberately: reconnecting is the only recovery
+/// we have from a silent stall, and raising it would trade that recovery for
+/// quieter logs. `river-moderator-health.sh` now counts these reconnects, so
+/// the cadence can be tuned against data rather than guessed. Logged at WARN,
+/// not ERROR: on this room it is a routine event.
+///
+/// # A reconnect does NOT recover the messages the stall swallowed
+///
+/// Do not assume otherwise -- an earlier draft of this note claimed the
+/// reconnect re-delivers recent messages as harmless duplicates and that "no
+/// event is lost". That is false. `spawn_reader` runs riverctl with
+/// `--initial-messages 0`, and on connect riverctl seeds EVERY existing
+/// message into its `seen_messages` set while displaying none, so nothing
+/// pre-existing is ever emitted. It also suppresses later deletion events for
+/// every message it did not show.
+///
+/// So anything posted while the reader was stalled or disconnected is never
+/// delivered here and never moderated, and deletions of those messages are
+/// invisible to us afterwards. During ordinary quiet this costs nothing --
+/// there were no messages to miss, which is why the room stays moderated in
+/// practice -- but during a REAL stall it is a genuine blind spot, precisely
+/// when moderation is most needed. Closing it needs the reader to fetch and
+/// replay what it missed across a reconnect, which is a separate change.
 const READER_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
 async fn reader_loop(config: Arc<Config>, sender: mpsc::Sender<RoomEvent>) {
@@ -1535,42 +1557,31 @@ async fn warning_loop(config: Arc<Config>, state: Arc<ModerationState>) {
             LowSeverityAction::Nudge => fixed_nudge(pending.category),
             LowSeverityAction::FormalWarning => fixed_warning(pending.category),
         };
-        let mut sent = send_fixed_reply(
+        let sent = send_fixed_reply(
             &config.river,
             &pending.room_owner,
             &pending.target_message_id,
             text,
         )
         .await;
-        // A busy room can evict the target from `recent_messages` during the
-        // grace period the moderator deliberately waits out, and riverctl
-        // cannot reply to a message it can no longer see. Dropping the notice
-        // there loses moderation exactly when the room is busiest, which is
-        // when it is most needed. Fall back to the same notice as a top-level
-        // `@`-mention -- the shape `begin_reaction_enforcement` already uses
-        // for notices with no message to hang under.
+        // A notice whose target riverctl can no longer see is DROPPED, and
+        // deliberately so. Re-posting it as a top-level `@`-mention was tried
+        // and reverted before merge: riverctl raises one error for two very
+        // different situations, because it looks the target up through
+        // `display_messages()`, which filters DELETED messages as well as
+        // aged-out ones. There is no way to tell them apart from the error.
         //
-        // The no-model-content invariant holds: `text` is a fixed string and
-        // the member ID is derived by the runtime, so nothing interpolated
-        // here is model output.
-        if sent
-            .as_ref()
-            .err()
-            .is_some_and(crate::river_action::is_expired_reply_target)
-        {
-            tracing::warn!(
-                decision_id = %pending.decision_id,
-                member_id = %pending.target_member_id,
-                message_hash = %short_hash(&pending.target_message_id),
-                "reply target expired from the room buffer; posting the notice at top level"
-            );
-            let notice = format!(
-                "@[{id}](rv:{id}) {text}",
-                id = pending.target_member_id,
-                text = text
-            );
-            sent = send_room_message(&config.river, &pending.room_owner, &notice).await;
-        }
+        // The deleted case is a member who complied. Worse, the moderator is
+        // systematically blind to deletions after a reconnect (riverctl
+        // suppresses deletion events for messages it did not show, and it is
+        // run with `--initial-messages 0`), so the local preflight above
+        // cannot catch it either. A top-level notice would then publicly
+        // reprimand someone for a message no reader can see -- the same
+        // "unexplained accusation" failure this codebase already avoids
+        // elsewhere, and it would have no retraction path.
+        //
+        // Losing an occasional nudge is the better error. It is logged
+        // distinctly below so the rate stays visible.
         match sent {
             // The reply ID is unused on this path for now: retracting a
             // nudge when its target is deleted needs the ID persisted on
@@ -1608,12 +1619,27 @@ async fn warning_loop(config: Arc<Config>, state: Arc<ModerationState>) {
             Err(error) => {
                 let _ =
                     state.complete_low_severity(&pending, LowSeverityOutcome::Failed, Utc::now());
-                tracing::error!(
-                    decision_id = %pending.decision_id,
-                    member_id = %pending.target_member_id,
-                    error = %format!("{error:#}"),
-                    "public moderation reply failed and was not retried"
-                );
+                // Separated so the two causes can be counted apart: a target
+                // riverctl can no longer see is expected occasionally and is
+                // not actionable, while any other failure means the action
+                // path itself is broken and should be investigated.
+                if crate::river_action::is_expired_reply_target(&error) {
+                    tracing::warn!(
+                        decision_id = %pending.decision_id,
+                        member_id = %pending.target_member_id,
+                        message_hash = %short_hash(&pending.target_message_id),
+                        action = ?pending.action,
+                        "public moderation reply dropped: target deleted or aged out of the room \
+                         buffer before the notice could be sent"
+                    );
+                } else {
+                    tracing::error!(
+                        decision_id = %pending.decision_id,
+                        member_id = %pending.target_member_id,
+                        error = %format!("{error:#}"),
+                        "public moderation reply failed and was not retried"
+                    );
+                }
             }
         }
     }
@@ -1963,6 +1989,42 @@ mod tests {
         assert!(
             squashed.contains(r#"idle_seconds=READER_IDLE_TIMEOUT.as_secs(),"#),
             "the elapsed branch must report the timeout that fired"
+        );
+    }
+
+    /// The stall guard's correctness lives in this call SITE, not in the
+    /// guard: the burst must count only messages that are new to us, timed on
+    /// the reader's stamp. Every `StallGuard` unit test exercises the object
+    /// in isolation, so a refactor that hoisted this call above the duplicate
+    /// check, dropped the `New` condition, or passed `Utc::now()` would
+    /// restore the 634-false-positives-a-day bug with the whole suite green.
+    #[test]
+    fn stall_guard_counts_only_new_messages_on_the_readers_clock() {
+        let source = include_str!("runtime.rs");
+        let production = source
+            .split_once("mod tests")
+            .map(|(before, _)| before)
+            .expect("test module marker missing; the cut would scan everything");
+        let squashed: String = production.chars().filter(|c| !c.is_whitespace()).collect();
+
+        let duplicate_check = squashed
+            .find("ifdisposition==EventDisposition::Duplicate{continue;}")
+            .expect("the duplicate short-circuit must still guard the burst counter");
+        let burst_call = squashed
+            .find("stall_guard.record_new_message(message.first_observed_at)")
+            .expect(
+                "the burst must be counted from the reader's first_observed_at, \
+                 never from dequeue-time Utc::now()",
+            );
+        assert!(
+            duplicate_check < burst_call,
+            "record_new_message must stay BELOW the duplicate check: counting \
+             re-delivered duplicates is the bug this guard was rewritten to fix"
+        );
+        assert!(
+            squashed[..burst_call].ends_with("ifdisposition==EventDisposition::New{"),
+            "the burst must be gated on New: an Edited event reuses the stored \
+             first_observed_at, so it compresses nothing and must not arm suppression"
         );
     }
 
