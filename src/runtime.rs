@@ -122,6 +122,12 @@ pub async fn run_moderator(config: Config) -> Result<()> {
                 if disposition == EventDisposition::Duplicate {
                     continue;
                 }
+                // Only NEW messages confirm a stall. A forced reconnect
+                // re-delivers recent messages, but those are duplicates that
+                // keep their original `first_observed_at`, so they compress
+                // nothing -- counting them made ordinary quiet look like a
+                // catch-up burst 634 times a day.
+                stall_guard.record_new_message();
                 let permit = concurrency.clone().acquire_owned().await?;
                 let task_config = config.clone();
                 let task_state = state.clone();
@@ -256,11 +262,23 @@ pub async fn run_moderator(config: Config) -> Result<()> {
 ///
 /// This does not fix the underlying network congestion -- that's an external
 /// condition, not a bug here. It bounds how long a stall can silently persist
-/// before the reader takes matters into its own hands. 3 minutes is well
-/// above ordinary quiet-room gaps observed today (activity resumes within
-/// seconds to low minutes even during lulls), so it should not trigger a
-/// reconnect during a merely-quiet period, while cutting a real stall from
-/// ~40 minutes down to a few.
+/// before the reader takes matters into its own hands, cutting a real stall
+/// from ~40 minutes down to a few.
+///
+/// It does NOT distinguish a dead reader from a quiet room, and cannot: both
+/// look like silence from here. The original note claimed 3 minutes was "well
+/// above ordinary quiet-room gaps"; measurement on 2026-08-06 falsified that
+/// -- the timeout fired 140 times in 24h, overwhelmingly overnight, i.e.
+/// almost every firing was a quiet room rather than a stall.
+///
+/// That is left as-is deliberately. Reconnecting is the only recovery we have
+/// from a silent stall, and a needless reconnect is cheap and safe: riverctl
+/// re-delivers recent messages, `record_message` discards them as duplicates,
+/// and no event is lost. Raising the timeout would trade the one recovery
+/// path for quieter logs. The cost that IS real is 140 full room re-fetches a
+/// day against the node; `river-moderator-health.sh` now counts these
+/// reconnects, so the cadence can be tuned against data rather than guessed.
+/// Logged at WARN, not ERROR: on this room it is a routine event.
 const READER_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
 async fn reader_loop(config: Arc<Config>, sender: mpsc::Sender<RoomEvent>) {
@@ -294,10 +312,11 @@ async fn reader_loop(config: Arc<Config>, sender: mpsc::Sender<RoomEvent>) {
                             break;
                         }
                         Err(_elapsed) => {
-                            tracing::error!(
+                            tracing::warn!(
                                 idle_seconds = READER_IDLE_TIMEOUT.as_secs(),
                                 "no events received within the idle timeout; forcing reconnect \
-                                 (possible silent subscription stall)"
+                                 (quiet room or silent subscription stall -- indistinguishable \
+                                 from here)"
                             );
                             break;
                         }
@@ -1516,14 +1535,43 @@ async fn warning_loop(config: Arc<Config>, state: Arc<ModerationState>) {
             LowSeverityAction::Nudge => fixed_nudge(pending.category),
             LowSeverityAction::FormalWarning => fixed_warning(pending.category),
         };
-        match send_fixed_reply(
+        let mut sent = send_fixed_reply(
             &config.river,
             &pending.room_owner,
             &pending.target_message_id,
             text,
         )
-        .await
+        .await;
+        // A busy room can evict the target from `recent_messages` during the
+        // grace period the moderator deliberately waits out, and riverctl
+        // cannot reply to a message it can no longer see. Dropping the notice
+        // there loses moderation exactly when the room is busiest, which is
+        // when it is most needed. Fall back to the same notice as a top-level
+        // `@`-mention -- the shape `begin_reaction_enforcement` already uses
+        // for notices with no message to hang under.
+        //
+        // The no-model-content invariant holds: `text` is a fixed string and
+        // the member ID is derived by the runtime, so nothing interpolated
+        // here is model output.
+        if sent
+            .as_ref()
+            .err()
+            .is_some_and(crate::river_action::is_expired_reply_target)
         {
+            tracing::warn!(
+                decision_id = %pending.decision_id,
+                member_id = %pending.target_member_id,
+                message_hash = %short_hash(&pending.target_message_id),
+                "reply target expired from the room buffer; posting the notice at top level"
+            );
+            let notice = format!(
+                "@[{id}](rv:{id}) {text}",
+                id = pending.target_member_id,
+                text = text
+            );
+            sent = send_room_message(&config.river, &pending.room_owner, &notice).await;
+        }
+        match sent {
             // The reply ID is unused on this path for now: retracting a
             // nudge when its target is deleted needs the ID persisted on
             // `PendingLowSeverity`, which the timestamp path below does.
