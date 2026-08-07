@@ -189,14 +189,132 @@ struct ReportOutcome {
 /// process's own wall-clock observations of event arrival -- nothing here
 /// trusts any user-supplied timestamp, so it cannot be gamed by a client
 /// claiming convenient times.
+///
+/// # Why a gap alone is not a stall
+///
+/// The first version suppressed on the GAP alone. That over-fired badly:
+/// measured over 24h on 2026-08-06 it warned 634 times (median gap 61s), so
+/// roughly 22% of the day sat inside a suppression window, and the log line
+/// that exists to make a real stall visible was buried under hundreds of
+/// routine ones. Worse, floods characteristically START after a lull, which
+/// is exactly the window a gap-only guard disables enforcement in.
+///
+/// Nothing exotic caused those 634: this room simply goes quiet for over 30
+/// seconds hundreds of times a day, and a gap alone was the whole trigger. A
+/// gap is evidence of silence, not of a stall.
+///
+/// What distinguishes a stall is what silence is followed BY. A real stall
+/// ends in a backlog drain: messages typed over many minutes are all stamped
+/// with nearly the same `first_observed_at`, which is precisely what corrupts
+/// the flooding count. Ordinary quiet ends with one person typing one
+/// message. So arming is by gap, and firing requires a burst of genuinely NEW
+/// messages compressed together.
+///
+/// Duplicates and edits are excluded because neither can compress anything:
+/// `record_message` preserves the ORIGINAL `first_observed_at` on both paths
+/// (see `EventDisposition`), so only `New` counts.
+///
+/// # The burst is timed on the same clock as the signal it guards
+///
+/// `record_new_message` takes the message's `first_observed_at` -- stamped in
+/// the reader task at wire-arrival -- NOT the moderator's dequeue time. This
+/// is load-bearing, not tidiness. The main loop does blocking work between
+/// dequeues (it awaits a concurrency permit, and runs reaction enforcement
+/// inline, which shells out to riverctl), so dequeue times can spread a
+/// drain's messages far apart while their `first_observed_at` stamps stay
+/// compressed. Timing the burst on dequeue time would let a slow main loop
+/// disarm the guard in the middle of exactly the drain it exists to catch,
+/// and would silently couple this threshold to `limits.concurrency`. Using
+/// the reader's clock measures the compression itself.
+///
+/// # What this does and does not cover
+///
+/// `Category::Flooding` has TWO independent sources and this guards only one
+/// of them. The count-based path (`author_messages_10_seconds`) is the one
+/// stall compression corrupts, and suppression is always armed before it can
+/// spike: that count needs 10 messages from a single author, where the burst
+/// needs 3 from anyone, so the burst always fires first. The classifier can
+/// ALSO return `Flooding` from content alone -- a single message that is a
+/// wall of ASCII art or copypasta -- with no count involved. That path is not
+/// corrupted by timing, so it needs no protection; the previous gap-only
+/// guard wrongly suppressed it after every lull, and requiring a burst means
+/// a lone content-wall now gets actioned correctly. The residual is that the
+/// consult site gates on the category rather than on which source fired, so a
+/// content-wall posted inside the 30s grace after a CONFIRMED burst is still
+/// over-suppressed. Rare, and it errs toward silence rather than toward a
+/// wrong public accusation.
+///
+/// A drain of only one or two messages cannot reach
+/// `BURST_MIN_NEW_MESSAGES` and so is not covered. Its count-based signal
+/// stays far below the ten-message threshold, but the nudge-tier flooding
+/// verdict is the model's judgement with no numeric floor, so a two-message
+/// compression could in principle still draw a nudge the gap-only guard would
+/// have blocked. Lowering the threshold to two was rejected: two messages
+/// within ten seconds of each other after a lull is ordinary conversation,
+/// and it would restore a large share of the false suppression this exists to
+/// remove.
+///
+/// Narrowed, not eliminated: a genuine live flood that happens to follow a
+/// natural lull still presents the same fingerprint as a drain (gap, then
+/// messages compressed together) and is still suppressed for the grace
+/// window. That was equally true of the gap-only version, and more often. It
+/// is in principle shapeable by an attacker -- pause, then burst -- but the
+/// same shaping defeated the old guard more cheaply, so this narrows the
+/// exposure rather than opening it. Closing it entirely would need a signal
+/// that separates "our reader stalled" from "the room went quiet", which we
+/// do not have.
 pub struct StallGuard {
-    last_event_at: std::sync::Mutex<DateTime<Utc>>,
-    suppress_flooding_until_millis: std::sync::atomic::AtomicI64,
+    inner: std::sync::Mutex<StallGuardState>,
+}
+
+/// Arming state for [`StallGuard`], tracking the burst that follows a gap.
+struct StallGuardState {
+    last_event_at: DateTime<Utc>,
+    /// `Some` once a gap crossed the threshold and we are watching for the
+    /// catch-up burst that would confirm it was a real stall.
+    armed: Option<ArmedGap>,
+    suppress_flooding_until: Option<DateTime<Utc>>,
+}
+
+/// A gap that crossed the stall threshold, plus the new-message burst
+/// observed since, which is what decides whether it was a stall.
+struct ArmedGap {
+    gap_seconds: i64,
+    /// When the gap armed this, on the reader's clock. Bounds how long one
+    /// lull can keep flooding enforcement suppressible.
+    armed_at: DateTime<Utc>,
+    first_new_message_at: Option<DateTime<Utc>>,
+    new_messages: u32,
 }
 
 impl StallGuard {
-    /// No events for at least this long counts as a stall.
+    /// No events for at least this long ARMS the guard. On its own this means
+    /// nothing -- a quiet room crosses it constantly. See the type docs.
     const STALL_GAP_SECONDS: i64 = 30;
+    /// New messages that must be observed inside `BURST_WINDOW_SECONDS` of
+    /// each other, after an armed gap, to confirm a catch-up burst. Three, so
+    /// suppression is always armed well before the ten-message flooding
+    /// signal it guards can spike.
+    const BURST_MIN_NEW_MESSAGES: u32 = 3;
+    /// How close together messages must be observed to count as one burst.
+    /// Matches the flooding signal's own 10-second window: messages spread
+    /// wider than this are not compressed together.
+    const BURST_WINDOW_SECONDS: i64 = 10;
+    /// How long an armed gap keeps watching for its burst.
+    ///
+    /// A drain is not always one clump. Transport congestion stalls
+    /// repeatedly, so delivery can resume, pause again for 11-29s (too short
+    /// to re-arm, since that needs `STALL_GAP_SECONDS`), then dump the rest.
+    /// Retiring the arm on the first late message would disarm the guard in
+    /// the middle of exactly that drain, so a late message re-anchors the
+    /// window instead and only this deadline retires the arm.
+    ///
+    /// Bounded because an arm that never expired would let any ordinary
+    /// 3-messages-in-10-seconds conversation, however long after the lull,
+    /// suppress enforcement. Two minutes comfortably covers a multi-phase
+    /// drain (a reconnect re-subscribes within ~5s) while keeping that window
+    /// short.
+    const ARM_TTL_SECONDS: i64 = 120;
     /// How long to suppress a public flooding action once a stall's catch-up
     /// burst has been observed. Generous relative to the 10-second flooding
     /// window itself, since a large backlog can take a few seconds to drain.
@@ -204,14 +322,32 @@ impl StallGuard {
 
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            last_event_at: std::sync::Mutex::new(Utc::now()),
-            suppress_flooding_until_millis: std::sync::atomic::AtomicI64::new(0),
+            inner: std::sync::Mutex::new(StallGuardState {
+                last_event_at: Utc::now(),
+                armed: None,
+                suppress_flooding_until: None,
+            }),
         })
     }
 
     /// Call once per inbound room event, before dispatching it for processing.
+    ///
+    /// Every event counts for liveness -- a delete or reaction ends a silent
+    /// period just as a message does -- but only [`Self::record_new_message`]
+    /// can confirm a stall.
     pub fn record_event(&self) {
         self.record_event_at(Utc::now());
+    }
+
+    /// Call once per message this process has never seen before, i.e. only
+    /// for `EventDisposition::New`.
+    ///
+    /// `observed_at` must be the message's `first_observed_at`, the reader's
+    /// wire-arrival stamp -- see the type docs on why the dequeue clock is
+    /// the wrong one. Duplicates and edits are excluded because both retain
+    /// their original stamp and so cannot compress anything.
+    pub fn record_new_message(&self, observed_at: DateTime<Utc>) {
+        self.record_new_message_at(observed_at, Utc::now());
     }
 
     /// True while a flooding action should be suppressed following a detected
@@ -223,31 +359,73 @@ impl StallGuard {
     /// Time-injectable core of `record_event`, so the 30-second threshold can
     /// be tested without a real 30-second sleep.
     fn record_event_at(&self, now: DateTime<Utc>) {
-        let mut last = self
-            .last_event_at
-            .lock()
-            .expect("stall guard mutex poisoned");
-        let gap_seconds = now.signed_duration_since(*last).num_seconds();
-        *last = now;
+        let mut state = self.inner.lock().expect("stall guard mutex poisoned");
+        let gap_seconds = now.signed_duration_since(state.last_event_at).num_seconds();
+        state.last_event_at = now;
         if gap_seconds >= Self::STALL_GAP_SECONDS {
-            let suppress_until = now + Duration::seconds(Self::CATCHUP_GRACE_SECONDS);
-            self.suppress_flooding_until_millis.store(
-                suppress_until.timestamp_millis(),
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            tracing::warn!(
+            state.armed = Some(ArmedGap {
                 gap_seconds,
-                "reader stall detected; suppressing public flooding actions briefly on catch-up"
-            );
+                armed_at: now,
+                first_new_message_at: None,
+                new_messages: 0,
+            });
         }
+    }
+
+    /// Time-injectable core of `record_new_message`.
+    ///
+    /// `observed_at` windows the burst (the reader's clock); `now` dates the
+    /// suppression window, because `is_suppressing_flooding` is asked in wall
+    /// time. Keeping them separate is what stops a lagging main loop from
+    /// shortening the grace it just granted.
+    fn record_new_message_at(&self, observed_at: DateTime<Utc>, now: DateTime<Utc>) {
+        let mut state = self.inner.lock().expect("stall guard mutex poisoned");
+        let Some(armed) = state.armed.as_mut() else {
+            return;
+        };
+        // The arm expires on its own deadline, never on a slow message.
+        if observed_at.signed_duration_since(armed.armed_at)
+            > Duration::seconds(Self::ARM_TTL_SECONDS)
+        {
+            state.armed = None;
+            return;
+        }
+        let first_at = *armed.first_new_message_at.get_or_insert(observed_at);
+        // Compared as a Duration, not truncated whole seconds, so the window
+        // is exactly BURST_WINDOW_SECONDS rather than up to a second longer.
+        if observed_at.signed_duration_since(first_at)
+            > Duration::seconds(Self::BURST_WINDOW_SECONDS)
+        {
+            // Too far from the previous anchor to be the same clump. This is
+            // the second phase of an interrupted drain as often as it is
+            // ordinary quiet, so re-anchor and keep watching rather than
+            // giving up: one late message must not disarm the guard for the
+            // remainder of the drain it exists to catch.
+            armed.first_new_message_at = Some(observed_at);
+            armed.new_messages = 1;
+            return;
+        }
+        armed.new_messages += 1;
+        if armed.new_messages < Self::BURST_MIN_NEW_MESSAGES {
+            return;
+        }
+        let gap_seconds = armed.gap_seconds;
+        let burst_messages = armed.new_messages;
+        state.armed = None;
+        state.suppress_flooding_until = Some(now + Duration::seconds(Self::CATCHUP_GRACE_SECONDS));
+        tracing::warn!(
+            gap_seconds,
+            burst_messages,
+            "reader stall detected; suppressing public flooding actions briefly on catch-up"
+        );
     }
 
     /// Time-injectable core of `is_suppressing_flooding`.
     fn is_suppressing_flooding_at(&self, now: DateTime<Utc>) -> bool {
-        let until_millis = self
-            .suppress_flooding_until_millis
-            .load(std::sync::atomic::Ordering::Relaxed);
-        until_millis > 0 && now.timestamp_millis() < until_millis
+        let state = self.inner.lock().expect("stall guard mutex poisoned");
+        state
+            .suppress_flooding_until
+            .is_some_and(|until| now < until)
     }
 }
 
@@ -1142,32 +1320,39 @@ mod tests {
             .is_none());
     }
 
-    /// The exact 2026-07-31 pattern: quiet, then a >=30s gap (a stall), then a
-    /// burst of events arriving together. The guard must start suppressing
-    /// immediately on the event that CROSSES the gap threshold (that event is
-    /// itself part of the catch-up burst, so it needs covering too), stay
-    /// suppressing for the grace window, and then stop on its own.
+    /// The exact 2026-07-31 pattern: quiet, then a >=30s gap, then a backlog
+    /// of NEW messages arriving together. That combination is a stall, and the
+    /// guard must suppress for the grace window and then stop on its own.
     #[test]
     fn detects_a_stall_then_burst_and_suppresses_only_during_grace() {
         let guard = StallGuard::new();
         let t0 = at(0);
         guard.record_event_at(t0);
+        guard.record_new_message_at(t0, t0);
         assert!(!guard.is_suppressing_flooding_at(t0), "no stall yet");
 
-        // A 29-second gap is ordinary processing latency, not a stall.
+        // A 29-second gap is ordinary processing latency, not even armed.
         let t1 = t0 + Duration::seconds(29);
         guard.record_event_at(t1);
+        guard.record_new_message_at(t1, t1);
         assert!(
             !guard.is_suppressing_flooding_at(t1),
             "29s gap is not a stall"
         );
 
-        // A 30-second gap crosses the threshold: this IS the stall.
+        // A 30-second gap arms the guard, and the backlog drains into it.
         let t2 = t1 + Duration::seconds(30);
         guard.record_event_at(t2);
+        guard.record_new_message_at(t2, t2);
+        guard.record_new_message_at(t2, t2);
+        assert!(
+            !guard.is_suppressing_flooding_at(t2),
+            "two messages is not yet a confirmed burst"
+        );
+        guard.record_new_message_at(t2, t2);
         assert!(
             guard.is_suppressing_flooding_at(t2),
-            "the event that crosses the gap threshold is itself part of the burst"
+            "the third new message confirms the catch-up burst"
         );
 
         // Still within the 30s grace window.
@@ -1189,8 +1374,186 @@ mod tests {
         for _ in 0..50 {
             t += Duration::seconds(5);
             guard.record_event_at(t);
+            guard.record_new_message_at(t, t);
             assert!(!guard.is_suppressing_flooding_at(t));
         }
+    }
+
+    /// The 634-false-positives-a-day case: a quiet room where each lull is
+    /// followed by a single live message. Nothing is compressed, so nothing
+    /// may be suppressed.
+    ///
+    /// Under the gap-only guard this asserted the opposite, which is the bug:
+    /// roughly 22% of the day sat inside a suppression window, and floods
+    /// characteristically start right after a lull.
+    #[test]
+    fn a_quiet_gap_followed_by_one_live_message_is_not_a_stall() {
+        let guard = StallGuard::new();
+        let mut t = at(0);
+        for _ in 0..20 {
+            // A 61-second lull: the measured median "stall" gap in production.
+            t += Duration::seconds(61);
+            guard.record_event_at(t);
+            guard.record_new_message_at(t, t);
+            assert!(
+                !guard.is_suppressing_flooding_at(t),
+                "an ordinary quiet room must not suppress flooding enforcement"
+            );
+        }
+    }
+
+    /// Events that are not new messages -- deletes, reactions, edits,
+    /// duplicates -- keep the liveness clock running but must never confirm a
+    /// stall on their own, however many of them arrive at once. Only
+    /// `record_new_message` can compress anything.
+    ///
+    /// An earlier version of this test was written as "a reconnect
+    /// re-delivers recent messages as duplicates". That premise was wrong:
+    /// riverctl runs with `--initial-messages 0` and seeds every pre-existing
+    /// message as already-seen, so a reconnect re-delivers nothing at all.
+    /// The contract being pinned is real regardless of what produces the
+    /// events, so the scenario was rewritten rather than deleted.
+    #[test]
+    fn a_burst_of_non_message_events_is_not_a_stall() {
+        let guard = StallGuard::new();
+        let t0 = at(0);
+        guard.record_event_at(t0);
+
+        let t1 = t0 + Duration::seconds(185);
+        for _ in 0..50 {
+            guard.record_event_at(t1);
+        }
+        assert!(
+            !guard.is_suppressing_flooding_at(t1),
+            "only new messages can compress observation times"
+        );
+    }
+
+    /// New messages that merely trickle in after a lull are live traffic, not
+    /// a drained backlog. Spread wider than the flooding signal's own
+    /// 10-second window, they cannot be compressed together, so the armed gap
+    /// must lapse rather than suppress.
+    #[test]
+    fn new_messages_spread_past_the_burst_window_do_not_confirm_a_stall() {
+        let guard = StallGuard::new();
+        let t0 = at(0);
+        guard.record_event_at(t0);
+
+        let t1 = t0 + Duration::seconds(120);
+        guard.record_event_at(t1);
+        guard.record_new_message_at(t1, t1);
+        guard.record_new_message_at(t1 + Duration::seconds(6), t1 + Duration::seconds(6));
+        // Past the 10-second burst window: this is conversation, not a drain.
+        guard.record_new_message_at(t1 + Duration::seconds(12), t1 + Duration::seconds(12));
+        guard.record_new_message_at(t1 + Duration::seconds(18), t1 + Duration::seconds(18));
+        assert!(
+            !guard.is_suppressing_flooding_at(t1 + Duration::seconds(18)),
+            "messages spread past the burst window are live traffic"
+        );
+    }
+
+    /// Suppression must be armed before the signal it guards can possibly
+    /// fire. The flooding signal needs `author_messages_10_seconds >= 10`;
+    /// this needs 3. Replaying a drain message-by-message, the guard must be
+    /// suppressing by the time the 10th lands.
+    ///
+    /// Asserted in BOTH directions on purpose. A one-sided version that only
+    /// checked "suppressing at and after the 3rd" would pass just as happily
+    /// with the threshold set to 1, so it would not pin the threshold at all.
+    #[test]
+    fn suppression_is_armed_before_the_flooding_signal_can_spike() {
+        let guard = StallGuard::new();
+        let t0 = at(0);
+        guard.record_event_at(t0);
+
+        let drain = t0 + Duration::seconds(2400);
+        guard.record_event_at(drain);
+        for delivered in 1..=10 {
+            guard.record_new_message_at(drain, drain);
+            assert_eq!(
+                guard.is_suppressing_flooding_at(drain),
+                delivered >= 3,
+                "message {delivered} of the drain: suppression must start at the 3rd, \
+                 and must NOT be active before it"
+            );
+        }
+    }
+
+    /// A stalled transport does not always drain in one clump: delivery can
+    /// resume, pause again briefly, then dump the rest. A pause of 11-29s is
+    /// too short to re-arm the guard (that needs a 30s gap), so if the first
+    /// late message retired the arm, the guard would go blind for exactly the
+    /// remainder of the drain it exists to catch. The late message must
+    /// re-anchor the burst window instead.
+    #[test]
+    fn an_interrupted_drain_still_confirms_the_stall() {
+        let guard = StallGuard::new();
+        let t0 = at(0);
+        guard.record_event_at(t0);
+
+        // 40s stall, then the first message of the drain arrives.
+        let resume = t0 + Duration::seconds(40);
+        guard.record_event_at(resume);
+        guard.record_new_message_at(resume, resume);
+
+        // Congestion again for 18s: too short to re-arm, long enough to fall
+        // outside the burst window.
+        let second_phase = resume + Duration::seconds(18);
+        guard.record_event_at(second_phase);
+        for _ in 0..3 {
+            guard.record_new_message_at(second_phase, second_phase);
+        }
+        assert!(
+            guard.is_suppressing_flooding_at(second_phase),
+            "the rest of an interrupted drain must still confirm the stall"
+        );
+    }
+
+    /// The arm must not live forever, or a single lull would leave any later
+    /// ordinary conversation burst able to suppress enforcement.
+    #[test]
+    fn an_armed_gap_expires_if_its_burst_never_arrives() {
+        let guard = StallGuard::new();
+        let t0 = at(0);
+        guard.record_event_at(t0);
+
+        let armed = t0 + Duration::seconds(40);
+        guard.record_event_at(armed);
+
+        // A perfectly ordinary 3-message conversation burst, well after the
+        // lull that armed the guard.
+        let much_later = armed + Duration::seconds(121);
+        for _ in 0..3 {
+            guard.record_new_message_at(much_later, much_later);
+        }
+        assert!(
+            !guard.is_suppressing_flooding_at(much_later),
+            "an expired arm must not let ordinary traffic suppress enforcement"
+        );
+    }
+
+    /// The burst is windowed on the reader's `first_observed_at`, not on the
+    /// moderator's dequeue time, because the main loop can block for tens of
+    /// seconds between dequeues (awaiting a concurrency permit, or running
+    /// reaction enforcement inline). A drain whose stamps are compressed must
+    /// still be recognised when the loop dequeues it slowly.
+    #[test]
+    fn a_slow_main_loop_does_not_disarm_a_compressed_drain() {
+        let guard = StallGuard::new();
+        let t0 = at(0);
+        guard.record_event_at(t0);
+
+        let drain = t0 + Duration::seconds(600);
+        guard.record_event_at(drain);
+        // All stamped by the reader within the same second, but dequeued 20
+        // seconds apart -- far wider than the burst window.
+        for slow in 0..3 {
+            guard.record_new_message_at(drain, drain + Duration::seconds(20 * slow));
+        }
+        assert!(
+            guard.is_suppressing_flooding_at(drain + Duration::seconds(40)),
+            "a compressed drain must be caught however slowly it is dequeued"
+        );
     }
 
     #[test]
