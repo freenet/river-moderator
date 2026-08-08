@@ -1477,10 +1477,21 @@ async fn timestamp_enforcement_loop(config: Arc<Config>, state: Arc<ModerationSt
                     // would leave `escalated: false` with an `enforce_after`
                     // already in the past -- every 5-second sweep after that
                     // would re-enter this branch and re-send the stern
-                    // warning, forever. `warning_message_id` is cleared here,
-                    // not carried over: the first notice's ID stays available
-                    // via the local `pending` binding for the best-effort
-                    // retraction below regardless of what lands in the DB.
+                    // warning, forever.
+                    //
+                    // Deliberately NOT clearing `warning_message_id` here
+                    // (via `..pending.clone()` it carries the FIRST warning's
+                    // ID through unchanged): if `send_fixed_reply` below then
+                    // fails, this reservation is what's left standing --
+                    // `escalated: true` is not retried (matching this same
+                    // function's crash-before-send tradeoff elsewhere), so
+                    // the member proceeds toward a ban having received only
+                    // the first warning. If the first warning's ID were
+                    // nulled here regardless of send outcome, that failure
+                    // would ALSO leave nothing retractable at ban time --
+                    // orphaning the one warning that was actually sent. The
+                    // ID is only replaced with the stern warning's real ID
+                    // once send_fixed_reply has actually confirmed one below.
                     // `ban_after` is an ABSOLUTE deadline computed once at
                     // `warned_at`. If the sweep itself was stalled past it --
                     // a service restart or deploy, a slow riverctl call
@@ -1503,7 +1514,6 @@ async fn timestamp_enforcement_loop(config: Arc<Config>, state: Arc<ModerationSt
                             as i64,
                     );
                     let reserved = PendingTimestampEnforcement {
-                        warning_message_id: None,
                         escalated: true,
                         enforce_after: reanchor_ban_deadline(ban_after, Utc::now(), min_notice),
                         ..pending.clone()
@@ -1546,12 +1556,10 @@ async fn timestamp_enforcement_loop(config: Arc<Config>, state: Arc<ModerationSt
                         }
                     };
                     // Best-effort: retract the first notice now that the
-                    // sterner one is posted, using the ID we already had in
-                    // hand -- the reserve above cleared the DB's copy, not
-                    // this local one. Only when the stern warning actually
-                    // got a trackable ID back: an older riverctl returns
-                    // `None` (see the comment on `warning_message_id`'s
-                    // field), and trading a retractable first notice for an
+                    // sterner one is posted. Only when the stern warning
+                    // actually got a trackable ID back: an older riverctl
+                    // returns `None`, and trading the first notice (still
+                    // retractable in the DB, per the reserve above) for an
                     // untrackable second one would leave NOTHING retractable
                     // -- keep the one notice we can still clean up later.
                     if stern_warning_id.is_some() {
@@ -2241,16 +2249,25 @@ mod tests {
         // below) before anything is sent -- a crash or send error after this
         // point must never leave `escalated: false` with an already-past
         // `enforce_after`, or every subsequent sweep would re-enter this
-        // branch and re-send the stern warning forever.
+        // branch and re-send the stern warning forever. Deliberately does
+        // NOT override `warning_message_id` -- `..pending.clone()` must carry
+        // the FIRST warning's ID through unchanged, so a send failure after
+        // this point leaves it retractable rather than orphaned.
         assert!(
             squashed.contains(
-                "letreserved=PendingTimestampEnforcement{warning_message_id:None,\
+                "letreserved=PendingTimestampEnforcement{\
                  escalated:true,\
                  enforce_after:reanchor_ban_deadline(ban_after,Utc::now(),min_notice),\
                  ..pending.clone()};"
             ),
             "the reservation must flip escalated and re-anchor enforce_after via \
              reanchor_ban_deadline, not blindly trust the stale ban_after"
+        );
+        assert!(
+            !squashed.contains("letreserved=PendingTimestampEnforcement{warning_message_id:None,"),
+            "the reservation must NOT null warning_message_id -- doing so before send_fixed_reply \
+             confirms a replacement leaves the first warning permanently unretractable if the \
+             send then fails"
         );
         assert!(
             squashed.contains(
