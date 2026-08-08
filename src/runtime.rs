@@ -1410,6 +1410,26 @@ async fn timestamp_enforcement_loop(config: Arc<Config>, state: Arc<ModerationSt
             // `config.example.toml`'s shipped default, so this is not an
             // edge case.
             if config.service.mode != Mode::Enforce {
+                // Retract any already-posted warning before clearing, the
+                // same way the compliance-retract branch below does. Without
+                // this, an operator downgrading from enforce mode mid-flight
+                // (the natural "calm things down" move, exactly when live
+                // warnings are outstanding) leaves every posted "delete this
+                // within 2 minutes or your access is removed" notice
+                // permanently un-retracted once its record is cleared here --
+                // the same "reads as an unexplained accusation" failure this
+                // file already treats as real elsewhere (see the delete-event
+                // handler's and the post-ban retraction's own comments).
+                if let Some(warning_id) = pending.warning_message_id.as_deref() {
+                    if let Err(error) =
+                        delete_own_message(&config.river, &pending.room_owner, warning_id).await
+                    {
+                        tracing::error!(
+                            error = %format!("{error:#}"),
+                            "could not retract the timestamp warning before a mode downgrade"
+                        );
+                    }
+                }
                 tracing::info!(
                     member_id = %pending.member_id,
                     escalated = pending.escalated,
@@ -2247,21 +2267,31 @@ mod tests {
         let loop_body_start = squashed
             .find("asyncfntimestamp_enforcement_loop(")
             .expect("timestamp_enforcement_loop's signature must exist");
-        assert!(
-            squashed[loop_body_start..].contains(
-                "ifconfig.service.mode!=Mode::Enforce{\
-                 tracing::info!(member_id=%pending.member_id,escalated=pending.escalated,\
-                 \"timestampenforcementdue;noactionoutsideenforcemode\");\
-                 let_=state.clear_timestamp_enforcement(&pending.room_owner,\
-                 &pending.target_message_id);continue;}"
-            ),
-            "the enforce-mode gate must clear the record and continue, not just skip -- \
-             otherwise a due record in shadow/warn mode is re-swept every 5 seconds forever"
-        );
         let mode_gate = squashed[loop_body_start..]
             .find("ifconfig.service.mode!=Mode::Enforce{")
             .map(|offset| offset + loop_body_start)
             .expect("the sweep loop must gate escalation and ban on enforce mode");
+        assert!(
+            squashed.contains("let_=state.clear_timestamp_enforcement(&pending.room_owner,&pending.target_message_id);continue;}"),
+            "the enforce-mode gate must clear the record and continue, not just skip -- \
+             otherwise a due record in shadow/warn mode is re-swept every 5 seconds forever"
+        );
+        assert!(
+            squashed.contains("couldnotretractthetimestampwarningbeforeamodedowngrade"),
+            "the enforce-mode gate must retract any already-posted warning before clearing -- \
+             otherwise an operator downgrading from enforce mode mid-flight leaves posted \
+             warnings permanently un-retracted"
+        );
+        let preflight_call = squashed[loop_body_start..]
+            .find("state.message_is_current(")
+            .map(|offset| offset + loop_body_start)
+            .expect("the presence preflight must exist");
+        assert!(
+            mode_gate < preflight_call,
+            "the enforce-mode gate must run BEFORE the presence preflight, not after -- \
+             otherwise every stuck record still costs a riverctl subprocess call per sweep \
+             tick in shadow/warn mode, even though nothing acts on the result"
+        );
         let reserve_call = squashed
             .find("matchstate.advance_timestamp_enforcement(&reserved){")
             .expect("the reservation must be persisted via the race-safe advance method");
