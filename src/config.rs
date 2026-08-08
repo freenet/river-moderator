@@ -193,9 +193,11 @@ impl Config {
         );
         anyhow::ensure!(
             self.policy.future_timestamp_ban_grace_seconds
-                > self.policy.future_timestamp_grace_seconds,
-            "future-timestamp ban deadline must be strictly after the escalation deadline, \
-             or the stern second warning would arm an already-elapsed ban"
+                >= self.policy.future_timestamp_grace_seconds + MIN_STERN_WARNING_WINDOW_SECONDS,
+            "future-timestamp ban deadline must leave at least the window \
+             FUTURE_TIMESTAMP_STERN_WARNING promises (\"2 minutes\") after the escalation \
+             deadline -- a merely-positive gap (e.g. grace + 1) would validate while silently \
+             giving the member a 1-second window the warning text claims is 2 minutes"
         );
         Ok(())
     }
@@ -370,6 +372,13 @@ fn default_future_timestamp_ban_grace_seconds() -> u64 {
     240
 }
 
+/// `crate::warnings::FUTURE_TIMESTAMP_STERN_WARNING` literally promises "2
+/// minutes". `validate()` enforces the escalate-to-ban gap is at least this,
+/// not merely positive -- otherwise a config like `grace = 120, ban_grace =
+/// 121` would pass validation while silently giving the member a 1-second
+/// window the warning text claims is 2 minutes.
+const MIN_STERN_WARNING_WINDOW_SECONDS: u64 = 120;
+
 fn default_embedded_image_grace_seconds() -> u64 {
     60
 }
@@ -410,8 +419,10 @@ pub struct PolicyConfig {
     /// 2026-08-08: 26 of 34 bans over two weeks were this reason, and content
     /// was routinely benign (a new member's first "Hello") -- a single
     /// 120-second window gives no room for a newcomer to miss one notice.
-    /// Must be greater than `future_timestamp_grace_seconds`; the gap between
-    /// the two is the stern-warning window.
+    /// Must be at least `future_timestamp_grace_seconds +
+    /// MIN_STERN_WARNING_WINDOW_SECONDS`; the gap between the two is the
+    /// stern-warning window, and it must cover what
+    /// `FUTURE_TIMESTAMP_STERN_WARNING` literally promises ("2 minutes").
     #[serde(default = "default_future_timestamp_ban_grace_seconds")]
     pub future_timestamp_ban_grace_seconds: u64,
     /// Deletion window for an embedded image. Shorter than the timestamp case:
@@ -538,6 +549,24 @@ mod tests {
         assert!(
             config.validate().is_err(),
             "a ban deadline before the escalation deadline must be rejected"
+        );
+
+        // A merely-positive gap is not enough: FUTURE_TIMESTAMP_STERN_WARNING
+        // literally promises "2 minutes", so a 1-second gap must be rejected
+        // even though it satisfies "after".
+        config.policy.future_timestamp_ban_grace_seconds =
+            config.policy.future_timestamp_grace_seconds + 1;
+        assert!(
+            config.validate().is_err(),
+            "a gap smaller than the window the warning text promises must be rejected"
+        );
+
+        // Exactly the promised window must be accepted.
+        config.policy.future_timestamp_ban_grace_seconds =
+            config.policy.future_timestamp_grace_seconds + MIN_STERN_WARNING_WINDOW_SECONDS;
+        assert!(
+            config.validate().is_ok(),
+            "a gap exactly matching the promised window must be accepted"
         );
     }
 }

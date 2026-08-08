@@ -1357,11 +1357,13 @@ async fn begin_reaction_enforcement(
 /// deploy, a slow earlier call in the same loop), a bare `ban_after` would
 /// arm a ban for the very next sweep tick -- the member reads "you have 2
 /// minutes" and is banned five seconds later. Re-anchoring to at least
-/// `min_notice` seconds from `now` (the moment the stern warning is actually
-/// sent) guarantees the full window regardless of how stale the precomputed
-/// deadline had become. A pure function so the stale-sweep case (`ban_after`
-/// already in the past) has a direct numeric test, not just a source-pin
-/// checking the expression is present.
+/// `min_notice` seconds from `now` (evaluated just before the send is
+/// attempted, so the member's real window is `min_notice` minus however long
+/// that `riverctl` call takes -- typically small, bounded by its own
+/// timeout) guarantees close to the full window regardless of how stale the
+/// precomputed deadline had become. A pure function so the stale-sweep case
+/// (`ban_after` already in the past) has a direct numeric test, not just a
+/// source-pin checking the expression is present.
 fn reanchor_ban_deadline(
     ban_after: DateTime<Utc>,
     now: DateTime<Utc>,
@@ -1391,6 +1393,33 @@ async fn timestamp_enforcement_loop(config: Arc<Config>, state: Arc<ModerationSt
             }
         };
         for pending in due {
+            // Neither escalation nor the ban call further down may run
+            // outside enforce mode -- mirrors the check
+            // `begin_self_delete_enforcement` already applies to the FIRST
+            // warning's send. Checked FIRST, before the presence preflight
+            // below, and CLEARS the record rather than just skipping: both
+            // `begin_self_delete_enforcement` and `begin_reaction_enforcement`
+            // reserve regardless of mode, so shadow/warn mode does persist
+            // records here. A `continue` without clearing would leave this
+            // exact record "due" again on every subsequent 5-second tick
+            // forever -- unbounded growth in `PENDING_TIMESTAMP`, a wasted
+            // `riverctl` presence-check subprocess every tick per stuck
+            // record, and (via the per-member dedup in
+            // `schedule_timestamp_enforcement`) that member permanently
+            // blocked from ever being flagged again. Shadow mode is
+            // `config.example.toml`'s shipped default, so this is not an
+            // edge case.
+            if config.service.mode != Mode::Enforce {
+                tracing::info!(
+                    member_id = %pending.member_id,
+                    escalated = pending.escalated,
+                    "timestamp enforcement due; no action outside enforce mode"
+                );
+                let _ = state
+                    .clear_timestamp_enforcement(&pending.room_owner, &pending.target_message_id);
+                continue;
+            }
+
             // A reaction is identified by (message, emoji, member) rather than
             // by an ID of its own, so its presence is read fresh from the room.
             // Message offences are answered from local state as before.
@@ -1444,22 +1473,6 @@ async fn timestamp_enforcement_loop(config: Arc<Config>, state: Arc<ModerationSt
                 );
                 let _ = state
                     .clear_timestamp_enforcement(&pending.room_owner, &pending.target_message_id);
-                continue;
-            }
-
-            // Neither escalation nor ban ever posts to the room or removes an
-            // account outside enforce mode -- mirrors the check
-            // `begin_self_delete_enforcement` already applies to the FIRST
-            // warning's send. Without this, shadow/warn mode would silently
-            // both post the stern warning (new behavior from this PR) AND
-            // execute real bans via the branch below (pre-existing: this loop
-            // had no mode check at all before this fix).
-            if config.service.mode != Mode::Enforce {
-                tracing::info!(
-                    member_id = %pending.member_id,
-                    escalated = pending.escalated,
-                    "timestamp enforcement due; no action outside enforce mode"
-                );
                 continue;
             }
 
@@ -1587,7 +1600,12 @@ async fn timestamp_enforcement_loop(config: Arc<Config>, state: Arc<ModerationSt
                             member_id = %with_new_warning.member_id,
                             reason = ?with_new_warning.reason,
                             skew_seconds = with_new_warning.claimed_skew_seconds,
-                            ban_after = %ban_after,
+                            // The actual persisted deadline, not the
+                            // pre-re-anchor `ban_after` -- the sweep interval
+                            // plus send time means these routinely differ,
+                            // and in the stale-sweep case `ban_after` is the
+                            // exact value the re-anchor exists to override.
+                            ban_after = %with_new_warning.enforce_after,
                             "sent stern second warning; ban deadline armed"
                         ),
                         Ok(false) => {
@@ -2204,15 +2222,32 @@ mod tests {
         // Neither escalation nor the ban call below may run outside enforce
         // mode -- without this gate, shadow/warn mode would post the stern
         // warning for real and (pre-existing bug this closes too) execute
-        // real bans. Must appear before BOTH the reservation and the ban call.
-        // `config.service.mode != Mode::Enforce` is also checked in TWO
-        // unrelated functions earlier in this file (the first-warning and
-        // first-reaction-notice sends) -- search from the compliance-retract
-        // branch's own log line so this finds the sweep loop's gate, not one
-        // of those.
+        // real bans. Must appear before BOTH the reservation and the ban
+        // call, AND before the presence preflight (a wasted riverctl
+        // subprocess call per stuck record every 5s otherwise). Pinned as one
+        // contiguous block -- condition, AND that it actually clears the
+        // record and continues, not just skips -- because a `continue`
+        // without clearing leaves the record due again on every subsequent
+        // tick forever (unbounded PENDING_TIMESTAMP growth, permanently
+        // blocking that member's dedup slot). `config.service.mode !=
+        // Mode::Enforce` is also checked in TWO unrelated functions earlier
+        // in this file (the first-warning and first-reaction-notice sends)
+        // -- search from this function's own signature so this finds the
+        // sweep loop's gate, not one of those.
         let loop_body_start = squashed
-            .find("future-datedmessagedeletedbyitsauthor;warningretracted")
-            .expect("the compliance-retract branch's log line must exist");
+            .find("asyncfntimestamp_enforcement_loop(")
+            .expect("timestamp_enforcement_loop's signature must exist");
+        assert!(
+            squashed[loop_body_start..].contains(
+                "ifconfig.service.mode!=Mode::Enforce{\
+                 tracing::info!(member_id=%pending.member_id,escalated=pending.escalated,\
+                 \"timestampenforcementdue;noactionoutsideenforcemode\");\
+                 let_=state.clear_timestamp_enforcement(&pending.room_owner,\
+                 &pending.target_message_id);continue;}"
+            ),
+            "the enforce-mode gate must clear the record and continue, not just skip -- \
+             otherwise a due record in shadow/warn mode is re-swept every 5 seconds forever"
+        );
         let mode_gate = squashed[loop_body_start..]
             .find("ifconfig.service.mode!=Mode::Enforce{")
             .map(|offset| offset + loop_body_start)
