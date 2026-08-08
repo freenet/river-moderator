@@ -1435,6 +1435,41 @@ async fn timestamp_enforcement_loop(config: Arc<Config>, state: Arc<ModerationSt
             // false` and falls straight through to the ban below, unchanged.
             if !pending.escalated {
                 if let Some(ban_after) = pending.ban_after {
+                    // Reserve the escalated stage BEFORE sending, mirroring
+                    // `begin_self_delete_enforcement`'s "reserve before
+                    // sending" rule (see its comment). Without this, a crash
+                    // or error between the send below and persisting here
+                    // would leave `escalated: false` with an `enforce_after`
+                    // already in the past -- every 5-second sweep after that
+                    // would re-enter this branch and re-send the stern
+                    // warning, forever. `warning_message_id` is cleared here,
+                    // not carried over: the first notice's ID stays available
+                    // via the local `pending` binding for the best-effort
+                    // retraction below regardless of what lands in the DB.
+                    let reserved = PendingTimestampEnforcement {
+                        warning_message_id: None,
+                        escalated: true,
+                        enforce_after: ban_after,
+                        ..pending.clone()
+                    };
+                    match state.advance_timestamp_enforcement(&reserved) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            tracing::info!(
+                                member_id = %pending.member_id,
+                                "offence resolved concurrently before escalating; nothing sent"
+                            );
+                            continue;
+                        }
+                        Err(error) => {
+                            tracing::error!(
+                                error = %format!("{error:#}"),
+                                member_id = %pending.member_id,
+                                "could not reserve the escalation stage; will retry next sweep"
+                            );
+                            continue;
+                        }
+                    }
                     let stern_warning_id = match send_fixed_reply(
                         &config.river,
                         &pending.room_owner,
@@ -1448,14 +1483,16 @@ async fn timestamp_enforcement_loop(config: Arc<Config>, state: Arc<ModerationSt
                             tracing::error!(
                                 error = %format!("{error:#}"),
                                 member_id = %pending.member_id,
-                                "could not send the stern second warning; will retry next sweep"
+                                "reserved the escalation stage but could not send the stern \
+                                 warning; ban deadline stays armed with no stern warning sent"
                             );
                             continue;
                         }
                     };
                     // Best-effort: retract the first notice now that the
-                    // sterner one is posted. A failure here just leaves both
-                    // notices visible, which is confusing but not incorrect.
+                    // sterner one is posted, using the ID we already had in
+                    // hand -- the reserve above cleared the DB's copy, not
+                    // this local one.
                     if let Some(old_warning_id) = pending.warning_message_id.as_deref() {
                         if let Err(error) =
                             delete_own_message(&config.river, &pending.room_owner, old_warning_id)
@@ -1467,28 +1504,49 @@ async fn timestamp_enforcement_loop(config: Arc<Config>, state: Arc<ModerationSt
                             );
                         }
                     }
-                    let escalated = PendingTimestampEnforcement {
-                        warning_message_id: stern_warning_id,
-                        escalated: true,
-                        enforce_after: ban_after,
-                        ..pending.clone()
+                    let with_new_warning = PendingTimestampEnforcement {
+                        warning_message_id: stern_warning_id.clone(),
+                        ..reserved
                     };
-                    match state.advance_timestamp_enforcement(&escalated) {
+                    match state.advance_timestamp_enforcement(&with_new_warning) {
                         Ok(true) => tracing::warn!(
-                            member_id = %escalated.member_id,
-                            reason = ?escalated.reason,
-                            skew_seconds = escalated.claimed_skew_seconds,
+                            member_id = %with_new_warning.member_id,
+                            reason = ?with_new_warning.reason,
+                            skew_seconds = with_new_warning.claimed_skew_seconds,
                             ban_after = %ban_after,
                             "sent stern second warning; ban deadline armed"
                         ),
-                        Ok(false) => tracing::info!(
-                            member_id = %escalated.member_id,
-                            "offence resolved concurrently with escalation; stern warning sent but no ban armed"
-                        ),
+                        Ok(false) => {
+                            // The author complied while we were sending. The
+                            // delete-event handler only knew the FIRST
+                            // warning's ID when it took the record, so it
+                            // could not have retracted the stern one -- we
+                            // must, or it sits in the room forever replying
+                            // to a now-deleted message.
+                            tracing::info!(
+                                member_id = %with_new_warning.member_id,
+                                "offence resolved concurrently while sending the stern warning; \
+                                 retracting it"
+                            );
+                            if let Some(warning_id) = stern_warning_id.as_deref() {
+                                if let Err(error) = delete_own_message(
+                                    &config.river,
+                                    &pending.room_owner,
+                                    warning_id,
+                                )
+                                .await
+                                {
+                                    tracing::error!(
+                                        error = %format!("{error:#}"),
+                                        "could not retract the stern warning after concurrent compliance"
+                                    );
+                                }
+                            }
+                        }
                         Err(error) => tracing::error!(
                             error = %format!("{error:#}"),
-                            member_id = %escalated.member_id,
-                            "could not persist escalation to the ban stage"
+                            member_id = %with_new_warning.member_id,
+                            "could not persist the stern warning's ID to the ban stage"
                         ),
                     }
                     continue;
@@ -2050,17 +2108,58 @@ mod tests {
             "escalation must be gated on both !escalated and ban_after being Some"
         );
 
-        // The re-armed record must flip `escalated` and move the ban deadline
-        // into `enforce_after` -- otherwise the next sweep would either loop
-        // the stern warning forever (escalated never set) or never ban
-        // (enforce_after never advanced to ban_after).
+        // The escalated stage must be RESERVED (escalated: true, enforce_after
+        // advanced to ban_after) before anything is sent -- a crash or send
+        // error after this point must never leave `escalated: false` with an
+        // already-past `enforce_after`, or every subsequent sweep would
+        // re-enter this branch and re-send the stern warning forever.
         assert!(
-            squashed.contains("escalated:true,enforce_after:ban_after,"),
-            "escalating must flip escalated and advance enforce_after to ban_after"
+            squashed.contains(
+                "letreserved=PendingTimestampEnforcement{warning_message_id:None,\
+                 escalated:true,enforce_after:ban_after,..pending.clone()};"
+            ),
+            "the reservation must flip escalated and advance enforce_after to ban_after \
+             BEFORE any send is attempted"
+        );
+        let reserve_call = squashed
+            .find("matchstate.advance_timestamp_enforcement(&reserved){")
+            .expect("the reservation must be persisted via the race-safe advance method");
+        let send_call = squashed
+            .find("=matchsend_fixed_reply(")
+            .expect("the stern warning must be sent via send_fixed_reply");
+        assert!(
+            reserve_call < send_call,
+            "the reservation must be persisted BEFORE the stern warning is sent, not after \
+             -- reserve-then-send is what makes a crash mid-send fail safe instead of \
+             re-sending on every later sweep"
+        );
+
+        // Persisting the final record (with the stern warning's real ID) must
+        // also go through the race-safe advance method, distinct from the
+        // reservation above.
+        assert!(
+            squashed.contains(
+                "letwith_new_warning=PendingTimestampEnforcement{\
+                 warning_message_id:stern_warning_id.clone(),..reserved};"
+            ),
+            "the stern warning's ID must be persisted onto the reserved record"
         );
         assert!(
-            squashed.contains("state.advance_timestamp_enforcement(&escalated)"),
-            "the escalated record must be persisted via the race-safe advance method"
+            squashed.contains("state.advance_timestamp_enforcement(&with_new_warning)"),
+            "the final record must be persisted via the race-safe advance method"
+        );
+
+        // If the author complies WHILE the stern warning is being sent, the
+        // delete-event handler only knows the FIRST warning's ID (it took the
+        // record before the stern warning existed), so it cannot retract the
+        // stern one -- this branch must do it itself, or it sits in the room
+        // forever replying to a now-deleted message.
+        assert!(
+            squashed.contains(
+                "delete_own_message(&config.river,&pending.room_owner,warning_id,).await"
+            ),
+            "concurrent compliance during the send must retract the just-sent stern warning, \
+             not just leave the database resurrection-safe"
         );
 
         // A dropped `continue` here would fall straight through into the ban
