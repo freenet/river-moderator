@@ -1428,6 +1428,22 @@ async fn timestamp_enforcement_loop(config: Arc<Config>, state: Arc<ModerationSt
                 continue;
             }
 
+            // Neither escalation nor ban ever posts to the room or removes an
+            // account outside enforce mode -- mirrors the check
+            // `begin_self_delete_enforcement` already applies to the FIRST
+            // warning's send. Without this, shadow/warn mode would silently
+            // both post the stern warning (new behavior from this PR) AND
+            // execute real bans via the branch below (pre-existing: this loop
+            // had no mode check at all before this fix).
+            if config.service.mode != Mode::Enforce {
+                tracing::info!(
+                    member_id = %pending.member_id,
+                    escalated = pending.escalated,
+                    "timestamp enforcement due; no action outside enforce mode"
+                );
+                continue;
+            }
+
             // Not yet escalated, and this reason has an escalation stage: send
             // the sterner second warning and re-arm for the ban deadline,
             // rather than banning on the first missed notice. A reason with no
@@ -1446,10 +1462,31 @@ async fn timestamp_enforcement_loop(config: Arc<Config>, state: Arc<ModerationSt
                     // not carried over: the first notice's ID stays available
                     // via the local `pending` binding for the best-effort
                     // retraction below regardless of what lands in the DB.
+                    // `ban_after` is an ABSOLUTE deadline computed once at
+                    // `warned_at`. If the sweep itself was stalled past it --
+                    // a service restart or deploy, a slow riverctl call
+                    // earlier in this same loop, the node hanging -- it can
+                    // already be in the past by the time we get here, which
+                    // would arm a ban for the very next 5-second tick: the
+                    // member reads "you have 2 minutes" and is banned before
+                    // they could act on it. Re-anchoring to at least
+                    // `ban_grace - grace` seconds from NOW (the moment the
+                    // stern warning is actually sent, below) guarantees the
+                    // full second window regardless of how stale the
+                    // precomputed deadlines had become. This assumes the only
+                    // reason with an escalation stage is `FutureTimestamp`;
+                    // revisit if a second one is ever added.
+                    let min_notice = Duration::seconds(
+                        config
+                            .policy
+                            .future_timestamp_ban_grace_seconds
+                            .saturating_sub(config.policy.future_timestamp_grace_seconds)
+                            as i64,
+                    );
                     let reserved = PendingTimestampEnforcement {
                         warning_message_id: None,
                         escalated: true,
-                        enforce_after: ban_after,
+                        enforce_after: ban_after.max(Utc::now() + min_notice),
                         ..pending.clone()
                     };
                     match state.advance_timestamp_enforcement(&reserved) {
@@ -1492,16 +1529,26 @@ async fn timestamp_enforcement_loop(config: Arc<Config>, state: Arc<ModerationSt
                     // Best-effort: retract the first notice now that the
                     // sterner one is posted, using the ID we already had in
                     // hand -- the reserve above cleared the DB's copy, not
-                    // this local one.
-                    if let Some(old_warning_id) = pending.warning_message_id.as_deref() {
-                        if let Err(error) =
-                            delete_own_message(&config.river, &pending.room_owner, old_warning_id)
-                                .await
-                        {
-                            tracing::error!(
-                                error = %format!("{error:#}"),
-                                "could not retract the first warning after escalating"
-                            );
+                    // this local one. Only when the stern warning actually
+                    // got a trackable ID back: an older riverctl returns
+                    // `None` (see the comment on `warning_message_id`'s
+                    // field), and trading a retractable first notice for an
+                    // untrackable second one would leave NOTHING retractable
+                    // -- keep the one notice we can still clean up later.
+                    if stern_warning_id.is_some() {
+                        if let Some(old_warning_id) = pending.warning_message_id.as_deref() {
+                            if let Err(error) = delete_own_message(
+                                &config.river,
+                                &pending.room_owner,
+                                old_warning_id,
+                            )
+                            .await
+                            {
+                                tracing::error!(
+                                    error = %format!("{error:#}"),
+                                    "could not retract the first warning after escalating"
+                                );
+                            }
                         }
                     }
                     let with_new_warning = PendingTimestampEnforcement {
@@ -2108,18 +2155,48 @@ mod tests {
             "escalation must be gated on both !escalated and ban_after being Some"
         );
 
+        // Neither escalation nor the ban call below may run outside enforce
+        // mode -- without this gate, shadow/warn mode would post the stern
+        // warning for real and (pre-existing bug this closes too) execute
+        // real bans. Must appear before BOTH the reservation and the ban call.
+        // `config.service.mode != Mode::Enforce` is also checked in TWO
+        // unrelated functions earlier in this file (the first-warning and
+        // first-reaction-notice sends) -- search from the compliance-retract
+        // branch's own log line so this finds the sweep loop's gate, not one
+        // of those.
+        let loop_body_start = squashed
+            .find("future-datedmessagedeletedbyitsauthor;warningretracted")
+            .expect("the compliance-retract branch's log line must exist");
+        let mode_gate = squashed[loop_body_start..]
+            .find("ifconfig.service.mode!=Mode::Enforce{")
+            .map(|offset| offset + loop_body_start)
+            .expect("the sweep loop must gate escalation and ban on enforce mode");
+
         // The escalated stage must be RESERVED (escalated: true, enforce_after
-        // advanced to ban_after) before anything is sent -- a crash or send
-        // error after this point must never leave `escalated: false` with an
-        // already-past `enforce_after`, or every subsequent sweep would
-        // re-enter this branch and re-send the stern warning forever.
+        // advanced to at least `ban_grace - grace` seconds from NOW) before
+        // anything is sent -- a crash or send error after this point must
+        // never leave `escalated: false` with an already-past `enforce_after`,
+        // or every subsequent sweep would re-enter this branch and re-send
+        // the stern warning forever. The `.max(Utc::now()+...)` re-anchor is
+        // what stops a stalled sweep (restart, deploy, a slow riverctl call
+        // earlier in the loop) from collapsing the two deadlines together --
+        // without it, a sweep that resumes after `ban_after` has already
+        // elapsed sends the stern warning and bans on the very next tick,
+        // five seconds later, giving no real window at all.
         assert!(
             squashed.contains(
                 "letreserved=PendingTimestampEnforcement{warning_message_id:None,\
-                 escalated:true,enforce_after:ban_after,..pending.clone()};"
+                 escalated:true,enforce_after:ban_after.max(Utc::now()+min_notice),\
+                 ..pending.clone()};"
             ),
-            "the reservation must flip escalated and advance enforce_after to ban_after \
-             BEFORE any send is attempted"
+            "the reservation must flip escalated and re-anchor enforce_after to at least \
+             min_notice seconds from now, not blindly trust the stale ban_after"
+        );
+        assert!(
+            squashed.contains(
+                "future_timestamp_ban_grace_seconds.saturating_sub(config.policy.future_timestamp_grace_seconds)"
+            ),
+            "min_notice must be derived from the configured escalate/ban gap, not hardcoded"
         );
         let reserve_call = squashed
             .find("matchstate.advance_timestamp_enforcement(&reserved){")
@@ -2127,11 +2204,35 @@ mod tests {
         let send_call = squashed
             .find("=matchsend_fixed_reply(")
             .expect("the stern warning must be sent via send_fixed_reply");
+        // `ban_member_safely` is also called from the UNRELATED severe-harm
+        // ban path earlier in this file -- search from `send_call` onward so
+        // this finds the sweep loop's own ban call, not that one.
+        let ban_call = squashed[send_call..]
+            .find("matchban_member_safely(")
+            .map(|offset| offset + send_call)
+            .expect("the sweep loop's own ban call must exist after the escalation branch");
+        assert!(
+            mode_gate < reserve_call,
+            "the enforce-mode gate must run before the reservation, not after"
+        );
+        assert!(
+            mode_gate < ban_call,
+            "the enforce-mode gate must also cover the ban call below, not just escalation"
+        );
         assert!(
             reserve_call < send_call,
             "the reservation must be persisted BEFORE the stern warning is sent, not after \
              -- reserve-then-send is what makes a crash mid-send fail safe instead of \
              re-sending on every later sweep"
+        );
+
+        // The (retractable) first notice must only be discarded when the
+        // stern warning actually got a trackable ID back -- an older riverctl
+        // returns `None`, and trading a retractable notice for an untrackable
+        // one would leave nothing retractable at all.
+        assert!(
+            squashed.contains("ifstern_warning_id.is_some(){ifletSome(old_warning_id)"),
+            "retracting the first notice must be gated on the stern warning having a real ID"
         );
 
         // Persisting the final record (with the stern warning's real ID) must

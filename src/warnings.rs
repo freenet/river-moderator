@@ -26,7 +26,7 @@ pub const TOPIC_NUDGE: &str = "Let's keep this room on topic. Back to Freenet.";
 /// and two that look like ordinary broken device clocks ("hlo", "oh hi chat").
 /// Nothing in the message distinguishes them, so the wording has to be correct
 /// for the innocent case while still stating the consequence.
-pub const FUTURE_TIMESTAMP_WARNING: &str = "Your message is dated in the future, so it sticks to the bottom of the room and never scrolls away. This is usually a device clock set wrong — worth checking yours. Please delete the message within 2 minutes, or it will be removed along with your access.";
+pub const FUTURE_TIMESTAMP_WARNING: &str = "Your message is dated in the future, so it sticks to the bottom of the room and never scrolls away. This is usually a device clock set wrong — worth checking yours. Please delete the message within 2 minutes, or you'll get one more notice before your access is removed.";
 
 /// Second and final notice, sent if the first `FUTURE_TIMESTAMP_WARNING` goes
 /// unactioned. A new member's first message in the room is routinely the one

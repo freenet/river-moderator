@@ -618,13 +618,21 @@ impl ModerationState {
     /// Unlike `schedule_timestamp_enforcement`, this does not dedupe by member:
     /// it assumes the caller just read this exact record via
     /// `due_timestamp_enforcements` and is advancing it, not creating a new
-    /// offence. It DOES guard against the record having been removed
-    /// concurrently (the author complied and the delete-event handler already
-    /// took it via `take_timestamp_enforcement`) by checking presence inside
-    /// the same write transaction: without that check, writing back an
-    /// unconditional insert here would resurrect a resolved offence. Returns
-    /// `false` when that race was hit, so the caller does not treat a
-    /// resurrected record as freshly escalated.
+    /// offence. It guards against the record having changed since that read --
+    /// not just having been REMOVED (the author complied and the delete-event
+    /// handler already took it via `take_timestamp_enforcement`), but having
+    /// been REPLACED by an unrelated record at the same key. `target_message_id`
+    /// alone is not a stable identity: a redelivered message re-enters
+    /// `begin_self_delete_enforcement` and reserves a fresh record the instant
+    /// the delete handler frees the key, and `begin_reaction_enforcement` keys
+    /// a `BadReaction` offence on the REACTED-TO message's ID, so it can share
+    /// a key with an unrelated message-content offence on that same message.
+    /// A presence-only check would happily overwrite either of those with this
+    /// call's stale data. The identity check (`member_id` + `warned_at`, which
+    /// together uniquely pin the offence this record was created for) closes
+    /// that gap. Returns `false` when identity does not match -- gone,
+    /// replaced, or anything else -- so the caller never treats someone else's
+    /// record as freshly escalated by this call.
     pub fn advance_timestamp_enforcement(
         &self,
         pending: &PendingTimestampEnforcement,
@@ -632,7 +640,14 @@ impl ModerationState {
         let key = event_key(&pending.room_owner, &pending.target_message_id);
         let write = self.database.begin_write()?;
         let mut table = write.open_table(PENDING_TIMESTAMP)?;
-        if table.get(key.as_str())?.is_none() {
+        let identity_matches = match table.get(key.as_str())? {
+            Some(value) => {
+                let current: PendingTimestampEnforcement = serde_json::from_slice(value.value())?;
+                current.member_id == pending.member_id && current.warned_at == pending.warned_at
+            }
+            None => false,
+        };
+        if !identity_matches {
             drop(table);
             write.commit()?;
             return Ok(false);
@@ -1295,6 +1310,79 @@ mod tests {
             .due_timestamp_enforcements(at(0) + Duration::seconds(600))
             .unwrap()
             .is_empty());
+    }
+
+    /// `target_message_id` alone is not a stable identity for this key: a
+    /// redelivered message can reserve a FRESH record the instant the delete
+    /// handler frees the key, and a `BadReaction` offence is keyed on the
+    /// reacted-to message's ID, so it can share a key with an unrelated
+    /// message-content offence on the same message. A presence-only check
+    /// (any record exists at this key) cannot tell "my own record, still
+    /// pending" from "a different record now occupies my key" -- it must
+    /// check identity (member + warned_at), or the stale sweep clobbers
+    /// someone else's live enforcement with its own out-of-date data.
+    #[test]
+    fn advancing_does_not_clobber_a_different_record_at_the_same_key() {
+        let dir = tempdir().unwrap();
+        let state = ModerationState::open(&dir.path().join("state.redb")).unwrap();
+        let stale = PendingTimestampEnforcement {
+            reason: SelfDeleteReason::FutureTimestamp,
+            room_owner: "room".into(),
+            member_id: "member-a".into(),
+            target_message_id: "msg".into(),
+            target_content_hash: "hash".into(),
+            warning_message_id: Some("notice-1".into()),
+            claimed_skew_seconds: 406,
+            reaction_emoji: None,
+            warned_at: at(0),
+            enforce_after: at(0) + Duration::seconds(120),
+            escalated: false,
+            ban_after: Some(at(0) + Duration::seconds(240)),
+        };
+        state.schedule_timestamp_enforcement(&stale).unwrap();
+
+        // Compliance removes it, then a DIFFERENT offence -- a BadReaction on
+        // the same message, or a redelivered message from a different member
+        // -- lands at the exact same key.
+        assert!(state
+            .take_timestamp_enforcement("room", "msg")
+            .unwrap()
+            .is_some());
+        let fresh = PendingTimestampEnforcement {
+            reason: SelfDeleteReason::BadReaction,
+            room_owner: "room".into(),
+            member_id: "member-b".into(),
+            target_message_id: "msg".into(),
+            target_content_hash: String::new(),
+            warning_message_id: Some("notice-fresh".into()),
+            claimed_skew_seconds: 0,
+            reaction_emoji: Some("x".into()),
+            warned_at: at(50),
+            enforce_after: at(50) + Duration::seconds(120),
+            escalated: false,
+            ban_after: None,
+        };
+        state.schedule_timestamp_enforcement(&fresh).unwrap();
+
+        // The sweep, still holding its stale read of the FIRST offence,
+        // tries to advance it -- must refuse rather than overwrite `fresh`.
+        let stale_escalated = PendingTimestampEnforcement {
+            escalated: true,
+            enforce_after: at(0) + Duration::seconds(240),
+            ..stale
+        };
+        assert!(!state
+            .advance_timestamp_enforcement(&stale_escalated)
+            .unwrap());
+
+        // `fresh` must be completely untouched.
+        let due = state
+            .due_timestamp_enforcements(at(50) + Duration::seconds(120))
+            .unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].member_id, "member-b");
+        assert_eq!(due[0].reason, SelfDeleteReason::BadReaction);
+        assert!(!due[0].escalated, "must not have been marked escalated");
     }
 
     /// A record written before escalation existed (no `escalated`/`ban_after`
