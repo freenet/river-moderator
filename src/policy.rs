@@ -209,6 +209,7 @@ mod tests {
         PolicyConfig {
             future_timestamp_seconds: 60,
             future_timestamp_grace_seconds: 120,
+            future_timestamp_ban_grace_seconds: 240,
             embedded_image_grace_seconds: 60,
             bad_reaction_grace_seconds: 120,
             leaked_invitation_grace_seconds: 300,

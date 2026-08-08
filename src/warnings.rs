@@ -28,6 +28,13 @@ pub const TOPIC_NUDGE: &str = "Let's keep this room on topic. Back to Freenet.";
 /// for the innocent case while still stating the consequence.
 pub const FUTURE_TIMESTAMP_WARNING: &str = "Your message is dated in the future, so it sticks to the bottom of the room and never scrolls away. This is usually a device clock set wrong — worth checking yours. Please delete the message within 2 minutes, or it will be removed along with your access.";
 
+/// Second and final notice, sent if the first `FUTURE_TIMESTAMP_WARNING` goes
+/// unactioned. A new member's first message in the room is routinely the one
+/// that trips this (a wrong device clock, not misconduct), so this restates
+/// the same likely-innocent cause and remedy rather than escalating tone --
+/// the only thing that changes is that there is no third notice.
+pub const FUTURE_TIMESTAMP_STERN_WARNING: &str = "Your message is still dated in the future. This is the second and final notice: if your device clock is wrong, please delete the message within 2 minutes, or your access to the room will be removed.";
+
 /// Shown when a message embeds an image.
 ///
 /// River renders message text as GFM markdown, so `![](...)` becomes a live
@@ -129,6 +136,33 @@ mod tests {
                 "must not accuse the author: {accusation:?}"
             );
         }
+    }
+
+    /// Same bar as the first notice: an unmissed device clock, not misconduct,
+    /// is still the likely cause the second time around.
+    #[test]
+    fn future_timestamp_stern_warning_is_actionable_and_not_accusatory() {
+        let text = FUTURE_TIMESTAMP_STERN_WARNING.to_lowercase();
+        assert!(
+            text.contains("clock"),
+            "must name the likely innocent cause"
+        );
+        assert!(text.contains("delete"), "must say what to do");
+        assert!(text.contains("2 minutes"), "must state the deadline");
+        for accusation in ["spam", "abuse", "attack", "deliberate", "stop"] {
+            assert!(
+                !text.contains(accusation),
+                "must not accuse the author: {accusation:?}"
+            );
+        }
+    }
+
+    /// The stern warning must actually read as distinct from the first, or a
+    /// member re-reading the thread cannot tell whether they're on notice 1 or
+    /// notice 2 -- which matters because notice 2 has no further grace after it.
+    #[test]
+    fn future_timestamp_stern_warning_differs_from_first_warning() {
+        assert_ne!(FUTURE_TIMESTAMP_STERN_WARNING, FUTURE_TIMESTAMP_WARNING);
     }
 
     /// Off-topic is one category covering every unrelated tangent, so its texts

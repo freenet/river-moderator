@@ -1203,17 +1203,24 @@ async fn begin_self_delete_enforcement(
     signals: &crate::event::TemporalSignals,
     reason: SelfDeleteReason,
 ) -> Result<()> {
-    let (grace_seconds, warning_text) = match reason {
+    // `ban_grace_seconds` is `Some` only for the one reason that gets a
+    // stern second warning before enforcement (see `timestamp_enforcement_loop`).
+    // Every other reason keeps today's single-deadline behavior: `enforce_after`
+    // IS the ban deadline and `ban_after` stays `None`.
+    let (grace_seconds, ban_grace_seconds, warning_text) = match reason {
         SelfDeleteReason::FutureTimestamp => (
             config.policy.future_timestamp_grace_seconds,
+            Some(config.policy.future_timestamp_ban_grace_seconds),
             crate::warnings::FUTURE_TIMESTAMP_WARNING,
         ),
         SelfDeleteReason::EmbeddedImage => (
             config.policy.embedded_image_grace_seconds,
+            None,
             crate::warnings::EMBEDDED_IMAGE_WARNING,
         ),
         SelfDeleteReason::LeakedInvitation => (
             config.policy.leaked_invitation_grace_seconds,
+            None,
             crate::warnings::LEAKED_INVITATION_WARNING,
         ),
         // Reactions take `begin_reaction_enforcement`: the notice is a
@@ -1224,6 +1231,7 @@ async fn begin_self_delete_enforcement(
             anyhow::bail!("reaction offences must use begin_reaction_enforcement")
         }
     };
+    let warned_at = Utc::now();
     let pending = PendingTimestampEnforcement {
         reason,
         room_owner: message.room_owner.clone(),
@@ -1233,8 +1241,10 @@ async fn begin_self_delete_enforcement(
         warning_message_id: None,
         claimed_skew_seconds: signals.claimed_clock_skew_seconds,
         reaction_emoji: None,
-        warned_at: Utc::now(),
-        enforce_after: Utc::now() + Duration::seconds(grace_seconds as i64),
+        warned_at,
+        enforce_after: warned_at + Duration::seconds(grace_seconds as i64),
+        escalated: false,
+        ban_after: ban_grace_seconds.map(|secs| warned_at + Duration::seconds(secs as i64)),
     };
     // Reserve BEFORE sending, so a redelivery cannot warn the same message
     // twice, and so a crash between send and store cannot re-warn on restart.
@@ -1302,6 +1312,8 @@ async fn begin_reaction_enforcement(
         warned_at: Utc::now(),
         enforce_after: Utc::now()
             + Duration::seconds(config.policy.bad_reaction_grace_seconds as i64),
+        escalated: false,
+        ban_after: None,
     };
     // Reserve before posting, so a redelivered event cannot warn twice. The
     // stream re-sends the FULL reactions map on every change to a message, so
@@ -1339,11 +1351,16 @@ async fn begin_reaction_enforcement(
     Ok(())
 }
 
-/// Resolve future-dated messages once their deadline passes.
+/// Resolve future-dated (and other self-delete) offences once their next
+/// deadline passes.
 ///
-/// Deleted in time -> retract the moderator's own warning, since a public notice
-/// pointing at nothing is just litter. Still present -> remove the account,
-/// because nothing else can clear the message.
+/// A reason with an escalation stage (`ban_after: Some`, currently only
+/// `FutureTimestamp`) gets two notices: deleted before `enforce_after` ->
+/// retract; still present -> a sterner second warning, then re-armed for
+/// `ban_after`. Every other reason keeps the original single deadline:
+/// deleted in time -> retract the moderator's own warning, since a public
+/// notice pointing at nothing is just litter; still present -> remove the
+/// account, because nothing else can clear the message.
 async fn timestamp_enforcement_loop(config: Arc<Config>, state: Arc<ModerationState>) {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -1409,6 +1426,73 @@ async fn timestamp_enforcement_loop(config: Arc<Config>, state: Arc<ModerationSt
                 let _ = state
                     .clear_timestamp_enforcement(&pending.room_owner, &pending.target_message_id);
                 continue;
+            }
+
+            // Not yet escalated, and this reason has an escalation stage: send
+            // the sterner second warning and re-arm for the ban deadline,
+            // rather than banning on the first missed notice. A reason with no
+            // escalation stage (`ban_after: None`) always has `escalated ==
+            // false` and falls straight through to the ban below, unchanged.
+            if !pending.escalated {
+                if let Some(ban_after) = pending.ban_after {
+                    let stern_warning_id = match send_fixed_reply(
+                        &config.river,
+                        &pending.room_owner,
+                        &pending.target_message_id,
+                        crate::warnings::FUTURE_TIMESTAMP_STERN_WARNING,
+                    )
+                    .await
+                    {
+                        Ok(id) => id,
+                        Err(error) => {
+                            tracing::error!(
+                                error = %format!("{error:#}"),
+                                member_id = %pending.member_id,
+                                "could not send the stern second warning; will retry next sweep"
+                            );
+                            continue;
+                        }
+                    };
+                    // Best-effort: retract the first notice now that the
+                    // sterner one is posted. A failure here just leaves both
+                    // notices visible, which is confusing but not incorrect.
+                    if let Some(old_warning_id) = pending.warning_message_id.as_deref() {
+                        if let Err(error) =
+                            delete_own_message(&config.river, &pending.room_owner, old_warning_id)
+                                .await
+                        {
+                            tracing::error!(
+                                error = %format!("{error:#}"),
+                                "could not retract the first warning after escalating"
+                            );
+                        }
+                    }
+                    let escalated = PendingTimestampEnforcement {
+                        warning_message_id: stern_warning_id,
+                        escalated: true,
+                        enforce_after: ban_after,
+                        ..pending.clone()
+                    };
+                    match state.advance_timestamp_enforcement(&escalated) {
+                        Ok(true) => tracing::warn!(
+                            member_id = %escalated.member_id,
+                            reason = ?escalated.reason,
+                            skew_seconds = escalated.claimed_skew_seconds,
+                            ban_after = %ban_after,
+                            "sent stern second warning; ban deadline armed"
+                        ),
+                        Ok(false) => tracing::info!(
+                            member_id = %escalated.member_id,
+                            "offence resolved concurrently with escalation; stern warning sent but no ban armed"
+                        ),
+                        Err(error) => tracing::error!(
+                            error = %format!("{error:#}"),
+                            member_id = %escalated.member_id,
+                            "could not persist escalation to the ban stage"
+                        ),
+                    }
+                    continue;
+                }
             }
 
             match ban_member_safely(

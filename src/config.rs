@@ -360,6 +360,10 @@ fn default_future_timestamp_grace_seconds() -> u64 {
     120
 }
 
+fn default_future_timestamp_ban_grace_seconds() -> u64 {
+    240
+}
+
 fn default_embedded_image_grace_seconds() -> u64 {
     60
 }
@@ -389,11 +393,21 @@ pub struct PolicyConfig {
     /// alongside the three that were an hour or more out.
     #[serde(default = "default_future_timestamp_seconds")]
     pub future_timestamp_seconds: i64,
-    /// How long the author has to delete a future-dated message before it is
-    /// enforced. Their own deletion is the only remedy: the contract lets only
-    /// the author delete, so the moderator cannot clear it for them.
+    /// How long the author has to delete a future-dated message before a
+    /// sterner second warning is posted. Their own deletion is the only
+    /// remedy: the contract lets only the author delete, so the moderator
+    /// cannot clear it for them.
     #[serde(default = "default_future_timestamp_grace_seconds")]
     pub future_timestamp_grace_seconds: u64,
+    /// How long, from the original warning, the author has before the
+    /// message is enforced (the account removed). Measured budget was
+    /// 2026-08-08: 26 of 34 bans over two weeks were this reason, and content
+    /// was routinely benign (a new member's first "Hello") -- a single
+    /// 120-second window gives no room for a newcomer to miss one notice.
+    /// Must be greater than `future_timestamp_grace_seconds`; the gap between
+    /// the two is the stern-warning window.
+    #[serde(default = "default_future_timestamp_ban_grace_seconds")]
+    pub future_timestamp_ban_grace_seconds: u64,
     /// Deletion window for an embedded image. Shorter than the timestamp case:
     /// a future-dated "hlo" is usually a broken clock, whereas an embedded image
     /// is always deliberate, and what it shows is visible to everyone meanwhile.
