@@ -1591,8 +1591,18 @@ async fn timestamp_enforcement_loop(config: Arc<Config>, state: Arc<ModerationSt
                             }
                         }
                     }
+                    // `.or(reserved.warning_message_id)`: when the stern
+                    // warning got no trackable ID back, the guard above just
+                    // left the FIRST notice deliberately un-retracted and
+                    // still in the room -- persisting `None` here regardless
+                    // would still orphan it, discarding the one ID that
+                    // stays valid (`reserved.warning_message_id`, unchanged
+                    // from `pending.warning_message_id`) for exactly the
+                    // record this branch just chose to keep.
                     let with_new_warning = PendingTimestampEnforcement {
-                        warning_message_id: stern_warning_id.clone(),
+                        warning_message_id: stern_warning_id
+                            .clone()
+                            .or(reserved.warning_message_id.clone()),
                         ..reserved
                     };
                     match state.advance_timestamp_enforcement(&with_new_warning) {
@@ -2339,13 +2349,20 @@ mod tests {
 
         // Persisting the final record (with the stern warning's real ID) must
         // also go through the race-safe advance method, distinct from the
-        // reservation above.
+        // reservation above. When the stern warning got no trackable ID back
+        // (`stern_warning_id: None`, older riverctl), the guard above left
+        // the FIRST notice deliberately un-retracted and still in the room --
+        // `.or(reserved.warning_message_id.clone())` is what keeps that ID
+        // (not `None`) persisted so it stays retractable later, rather than
+        // discarding the one ID the branch just chose to keep.
         assert!(
             squashed.contains(
                 "letwith_new_warning=PendingTimestampEnforcement{\
-                 warning_message_id:stern_warning_id.clone(),..reserved};"
+                 warning_message_id:stern_warning_id\
+                 .clone().or(reserved.warning_message_id.clone()),..reserved};"
             ),
-            "the stern warning's ID must be persisted onto the reserved record"
+            "the stern warning's ID must be persisted onto the reserved record, falling back to \
+             the first warning's ID when the stern warning got no trackable ID back"
         );
         assert!(
             squashed.contains("state.advance_timestamp_enforcement(&with_new_warning)"),
