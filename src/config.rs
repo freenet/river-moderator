@@ -191,6 +191,12 @@ impl Config {
                 && self.policy.deputy_ban_confidence_millionths <= 1_000_000,
             "confidence thresholds must be ordered and at most one million"
         );
+        anyhow::ensure!(
+            self.policy.future_timestamp_ban_grace_seconds
+                > self.policy.future_timestamp_grace_seconds,
+            "future-timestamp ban deadline must be strictly after the escalation deadline, \
+             or the stern second warning would arm an already-elapsed ban"
+        );
         Ok(())
     }
 }
@@ -500,5 +506,38 @@ mod tests {
         assert!(model
             .maximum_request_cost_microusd(2, ModelRole::Classifier)
             .is_err());
+    }
+
+    /// A ban deadline at or before the escalation deadline would collapse
+    /// this feature's whole point: `ban_after` (computed at `warned_at`) is
+    /// already elapsed by the time the escalation sweep even fires, so the
+    /// stern second warning would arm a ban the very next 5-second tick --
+    /// the 2-minute cushion this exists to add silently becomes ~5 seconds.
+    /// Loads the repo's own shipped example config rather than hand-building
+    /// a full `Config` literal, since nothing else in this file does that.
+    #[test]
+    fn future_timestamp_ban_deadline_must_be_after_the_escalation_deadline() {
+        let mut config = Config::load(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/config.example.toml"
+        )))
+        .expect("the shipped example config must parse");
+        config
+            .validate()
+            .expect("the shipped example config must be valid as shipped");
+
+        config.policy.future_timestamp_ban_grace_seconds =
+            config.policy.future_timestamp_grace_seconds;
+        assert!(
+            config.validate().is_err(),
+            "a ban deadline equal to the escalation deadline must be rejected"
+        );
+
+        config.policy.future_timestamp_ban_grace_seconds =
+            config.policy.future_timestamp_grace_seconds - 1;
+        assert!(
+            config.validate().is_err(),
+            "a ban deadline before the escalation deadline must be rejected"
+        );
     }
 }

@@ -2002,6 +2002,76 @@ mod tests {
         );
     }
 
+    /// The escalate-vs-ban decision in `timestamp_enforcement_loop`, and which
+    /// reasons even have an escalation stage, are exercised in `state.rs`'s
+    /// tests only through already-correct `PendingTimestampEnforcement`
+    /// values -- nothing there proves the loop wires them up right, and there
+    /// is no fake-riverctl harness to drive the real async loop end to end.
+    /// Pinned here the same way `reader_loop_forces_reconnect_on_idle_timeout`
+    /// pins its otherwise-untestable control flow.
+    #[test]
+    fn future_timestamp_escalation_control_flow_is_wired_correctly() {
+        let source = include_str!("runtime.rs");
+        let production = source
+            .split_once("mod tests")
+            .map(|(before, _)| before)
+            .expect("test module marker missing; the cut would scan everything");
+        let squashed: String = production.chars().filter(|c| !c.is_whitespace()).collect();
+
+        // Only FutureTimestamp gets a ban deadline distinct from its warning
+        // deadline -- every other self-delete reason must keep `None`, or it
+        // would silently gain an (unwarned) escalation stage of its own.
+        assert!(
+            squashed.contains(
+                "SelfDeleteReason::FutureTimestamp=>(config.policy.future_timestamp_grace_seconds,\
+                 Some(config.policy.future_timestamp_ban_grace_seconds)"
+            ),
+            "FutureTimestamp must be the reason with an escalation stage"
+        );
+        assert!(
+            squashed.contains(
+                "SelfDeleteReason::EmbeddedImage=>(config.policy.embedded_image_grace_seconds,None,"
+            ),
+            "EmbeddedImage must not gain an escalation stage"
+        );
+        assert!(
+            squashed.contains(
+                "SelfDeleteReason::LeakedInvitation=>(config.policy.leaked_invitation_grace_seconds,None,"
+            ),
+            "LeakedInvitation must not gain an escalation stage"
+        );
+
+        // The sweep loop must gate the stern-warning branch on BOTH "not
+        // already escalated" and "this reason has a ban_after" -- dropping
+        // either check would re-send the stern warning forever, or treat a
+        // no-escalation reason as if it had one.
+        assert!(
+            squashed.contains("if!pending.escalated{ifletSome(ban_after)=pending.ban_after{"),
+            "escalation must be gated on both !escalated and ban_after being Some"
+        );
+
+        // The re-armed record must flip `escalated` and move the ban deadline
+        // into `enforce_after` -- otherwise the next sweep would either loop
+        // the stern warning forever (escalated never set) or never ban
+        // (enforce_after never advanced to ban_after).
+        assert!(
+            squashed.contains("escalated:true,enforce_after:ban_after,"),
+            "escalating must flip escalated and advance enforce_after to ban_after"
+        );
+        assert!(
+            squashed.contains("state.advance_timestamp_enforcement(&escalated)"),
+            "the escalated record must be persisted via the race-safe advance method"
+        );
+
+        // A dropped `continue` here would fall straight through into the ban
+        // call in the SAME sweep iteration the stern warning was just sent --
+        // banning on the first missed notice exactly as before this feature.
+        assert!(
+            squashed.contains("continue;}}matchban_member_safely("),
+            "the escalation branch must continue, never fall through to an immediate ban"
+        );
+    }
+
     fn message(content: &str) -> VerifiedMessage {
         VerifiedMessage {
             message_id: "message".into(),
