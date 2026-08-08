@@ -1385,6 +1385,72 @@ mod tests {
         assert!(!due[0].escalated, "must not have been marked escalated");
     }
 
+    /// The previous test varies `member_id`, which alone already makes the
+    /// identity check fail -- it cannot prove the `warned_at` half of the
+    /// `member_id == .. && warned_at == ..` check is load-bearing. This is
+    /// the redelivery scenario `advance_timestamp_enforcement`'s own doc
+    /// comment names as the primary motivation: the SAME member's message
+    /// gets redelivered and reserves a FRESH record (a new `warned_at`) the
+    /// instant the delete handler frees the key, and a sweep still holding
+    /// the stale `warned_at` must not advance onto it.
+    #[test]
+    fn advancing_does_not_clobber_a_redelivered_record_from_the_same_member() {
+        let dir = tempdir().unwrap();
+        let state = ModerationState::open(&dir.path().join("state.redb")).unwrap();
+        let stale = PendingTimestampEnforcement {
+            reason: SelfDeleteReason::FutureTimestamp,
+            room_owner: "room".into(),
+            member_id: "member-a".into(),
+            target_message_id: "msg".into(),
+            target_content_hash: "hash".into(),
+            warning_message_id: Some("notice-1".into()),
+            claimed_skew_seconds: 406,
+            reaction_emoji: None,
+            warned_at: at(0),
+            enforce_after: at(0) + Duration::seconds(120),
+            escalated: false,
+            ban_after: Some(at(0) + Duration::seconds(240)),
+        };
+        state.schedule_timestamp_enforcement(&stale).unwrap();
+        assert!(state
+            .take_timestamp_enforcement("room", "msg")
+            .unwrap()
+            .is_some());
+
+        // The message is redelivered and reserves a fresh record for the
+        // SAME member, with a new `warned_at`.
+        let redelivered = PendingTimestampEnforcement {
+            warning_message_id: Some("notice-redelivered".into()),
+            warned_at: at(50),
+            enforce_after: at(50) + Duration::seconds(120),
+            ban_after: Some(at(50) + Duration::seconds(240)),
+            ..stale.clone()
+        };
+        state.schedule_timestamp_enforcement(&redelivered).unwrap();
+
+        // The sweep, still holding its stale read (old warned_at), tries to
+        // advance it -- must refuse even though member_id matches.
+        let stale_escalated = PendingTimestampEnforcement {
+            escalated: true,
+            enforce_after: at(0) + Duration::seconds(240),
+            ..stale
+        };
+        assert!(!state
+            .advance_timestamp_enforcement(&stale_escalated)
+            .unwrap());
+
+        // The redelivered record must be completely untouched.
+        let due = state
+            .due_timestamp_enforcements(at(50) + Duration::seconds(120))
+            .unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].warning_message_id, Some("notice-redelivered".into()));
+        assert!(
+            !due[0].escalated,
+            "must not have been marked escalated by the stale sweep"
+        );
+    }
+
     /// A record written before escalation existed (no `escalated`/`ban_after`
     /// fields in its JSON) must deserialize as `escalated: false, ban_after:
     /// None` -- the single-deadline behavior every reason had before this

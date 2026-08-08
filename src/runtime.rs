@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Instant};
 
 use anyhow::{Context, Result};
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use redb::Database;
 use tokio::sync::{mpsc, Semaphore};
 
@@ -1351,6 +1351,25 @@ async fn begin_reaction_enforcement(
     Ok(())
 }
 
+/// Never let a stale `ban_after` collapse the escalation window to nothing.
+/// `ban_after` is an ABSOLUTE deadline computed once at `warned_at`; if the
+/// sweep loop resumes after it has already elapsed (a stalled service, a
+/// deploy, a slow earlier call in the same loop), a bare `ban_after` would
+/// arm a ban for the very next sweep tick -- the member reads "you have 2
+/// minutes" and is banned five seconds later. Re-anchoring to at least
+/// `min_notice` seconds from `now` (the moment the stern warning is actually
+/// sent) guarantees the full window regardless of how stale the precomputed
+/// deadline had become. A pure function so the stale-sweep case (`ban_after`
+/// already in the past) has a direct numeric test, not just a source-pin
+/// checking the expression is present.
+fn reanchor_ban_deadline(
+    ban_after: DateTime<Utc>,
+    now: DateTime<Utc>,
+    min_notice: Duration,
+) -> DateTime<Utc> {
+    ban_after.max(now + min_notice)
+}
+
 /// Resolve future-dated (and other self-delete) offences once their next
 /// deadline passes.
 ///
@@ -1486,7 +1505,7 @@ async fn timestamp_enforcement_loop(config: Arc<Config>, state: Arc<ModerationSt
                     let reserved = PendingTimestampEnforcement {
                         warning_message_id: None,
                         escalated: true,
-                        enforce_after: ban_after.max(Utc::now() + min_notice),
+                        enforce_after: reanchor_ban_deadline(ban_after, Utc::now(), min_notice),
                         ..pending.clone()
                     };
                     match state.advance_timestamp_enforcement(&reserved) {
@@ -2107,6 +2126,16 @@ mod tests {
         );
     }
 
+    /// Shared setup for the `future_timestamp_escalation_*` pin tests below:
+    /// the production source (everything before `mod tests`, so a test's own
+    /// assertion strings can never self-match) with all whitespace stripped.
+    /// Split across several tests -- see the doc comment that used to sit on
+    /// one giant `future_timestamp_escalation_control_flow_is_wired_correctly`
+    /// -- so a failure names the specific invariant that broke instead of an
+    /// undifferentiated wall of asserts, and later changes to one aspect (say,
+    /// the retraction guard) don't force touching an unrelated assertion block
+    /// (say, the reason mapping).
+    ///
     /// The escalate-vs-ban decision in `timestamp_enforcement_loop`, and which
     /// reasons even have an escalation stage, are exercised in `state.rs`'s
     /// tests only through already-correct `PendingTimestampEnforcement`
@@ -2114,14 +2143,18 @@ mod tests {
     /// is no fake-riverctl harness to drive the real async loop end to end.
     /// Pinned here the same way `reader_loop_forces_reconnect_on_idle_timeout`
     /// pins its otherwise-untestable control flow.
-    #[test]
-    fn future_timestamp_escalation_control_flow_is_wired_correctly() {
+    fn squashed_production_source() -> String {
         let source = include_str!("runtime.rs");
         let production = source
             .split_once("mod tests")
             .map(|(before, _)| before)
             .expect("test module marker missing; the cut would scan everything");
-        let squashed: String = production.chars().filter(|c| !c.is_whitespace()).collect();
+        production.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    #[test]
+    fn future_timestamp_reason_mapping_gives_only_it_an_escalation_stage() {
+        let squashed = squashed_production_source();
 
         // Only FutureTimestamp gets a ban deadline distinct from its warning
         // deadline -- every other self-delete reason must keep `None`, or it
@@ -2145,6 +2178,11 @@ mod tests {
             ),
             "LeakedInvitation must not gain an escalation stage"
         );
+    }
+
+    #[test]
+    fn escalation_gate_and_enforce_mode_gate_cover_both_reserve_and_ban() {
+        let squashed = squashed_production_source();
 
         // The sweep loop must gate the stern-warning branch on BOTH "not
         // already escalated" and "this reason has a ban_after" -- dropping
@@ -2171,33 +2209,6 @@ mod tests {
             .find("ifconfig.service.mode!=Mode::Enforce{")
             .map(|offset| offset + loop_body_start)
             .expect("the sweep loop must gate escalation and ban on enforce mode");
-
-        // The escalated stage must be RESERVED (escalated: true, enforce_after
-        // advanced to at least `ban_grace - grace` seconds from NOW) before
-        // anything is sent -- a crash or send error after this point must
-        // never leave `escalated: false` with an already-past `enforce_after`,
-        // or every subsequent sweep would re-enter this branch and re-send
-        // the stern warning forever. The `.max(Utc::now()+...)` re-anchor is
-        // what stops a stalled sweep (restart, deploy, a slow riverctl call
-        // earlier in the loop) from collapsing the two deadlines together --
-        // without it, a sweep that resumes after `ban_after` has already
-        // elapsed sends the stern warning and bans on the very next tick,
-        // five seconds later, giving no real window at all.
-        assert!(
-            squashed.contains(
-                "letreserved=PendingTimestampEnforcement{warning_message_id:None,\
-                 escalated:true,enforce_after:ban_after.max(Utc::now()+min_notice),\
-                 ..pending.clone()};"
-            ),
-            "the reservation must flip escalated and re-anchor enforce_after to at least \
-             min_notice seconds from now, not blindly trust the stale ban_after"
-        );
-        assert!(
-            squashed.contains(
-                "future_timestamp_ban_grace_seconds.saturating_sub(config.policy.future_timestamp_grace_seconds)"
-            ),
-            "min_notice must be derived from the configured escalate/ban gap, not hardcoded"
-        );
         let reserve_call = squashed
             .find("matchstate.advance_timestamp_enforcement(&reserved){")
             .expect("the reservation must be persisted via the race-safe advance method");
@@ -2219,12 +2230,51 @@ mod tests {
             mode_gate < ban_call,
             "the enforce-mode gate must also cover the ban call below, not just escalation"
         );
+    }
+
+    #[test]
+    fn escalation_reserves_before_sending_and_reanchors_the_ban_deadline() {
+        let squashed = squashed_production_source();
+
+        // The escalated stage must be RESERVED (escalated: true, enforce_after
+        // re-anchored via `reanchor_ban_deadline`, unit-tested separately
+        // below) before anything is sent -- a crash or send error after this
+        // point must never leave `escalated: false` with an already-past
+        // `enforce_after`, or every subsequent sweep would re-enter this
+        // branch and re-send the stern warning forever.
+        assert!(
+            squashed.contains(
+                "letreserved=PendingTimestampEnforcement{warning_message_id:None,\
+                 escalated:true,\
+                 enforce_after:reanchor_ban_deadline(ban_after,Utc::now(),min_notice),\
+                 ..pending.clone()};"
+            ),
+            "the reservation must flip escalated and re-anchor enforce_after via \
+             reanchor_ban_deadline, not blindly trust the stale ban_after"
+        );
+        assert!(
+            squashed.contains(
+                "future_timestamp_ban_grace_seconds.saturating_sub(config.policy.future_timestamp_grace_seconds)"
+            ),
+            "min_notice must be derived from the configured escalate/ban gap, not hardcoded"
+        );
+        let reserve_call = squashed
+            .find("matchstate.advance_timestamp_enforcement(&reserved){")
+            .expect("the reservation must be persisted via the race-safe advance method");
+        let send_call = squashed
+            .find("=matchsend_fixed_reply(")
+            .expect("the stern warning must be sent via send_fixed_reply");
         assert!(
             reserve_call < send_call,
             "the reservation must be persisted BEFORE the stern warning is sent, not after \
              -- reserve-then-send is what makes a crash mid-send fail safe instead of \
              re-sending on every later sweep"
         );
+    }
+
+    #[test]
+    fn escalation_retraction_and_persistence_are_correct() {
+        let squashed = squashed_production_source();
 
         // The (retractable) first notice must only be discarded when the
         // stern warning actually got a trackable ID back -- an older riverctl
@@ -2270,6 +2320,41 @@ mod tests {
             squashed.contains("continue;}}matchban_member_safely("),
             "the escalation branch must continue, never fall through to an immediate ban"
         );
+    }
+
+    /// Direct numeric coverage for `reanchor_ban_deadline`, the arithmetic
+    /// the fix above only pins as a source string. This is what actually
+    /// exercises the stale-sweep case: without it, nothing in the suite ever
+    /// evaluates the expression with `ban_after` in the past.
+    #[test]
+    fn reanchor_keeps_a_ban_after_that_is_comfortably_in_the_future() {
+        let now = Utc::now();
+        let min_notice = Duration::seconds(120);
+        let ban_after = now + Duration::seconds(200);
+        assert_eq!(reanchor_ban_deadline(ban_after, now, min_notice), ban_after);
+    }
+
+    #[test]
+    fn reanchor_pulls_a_stale_ban_after_up_to_the_minimum_notice_window() {
+        let now = Utc::now();
+        let min_notice = Duration::seconds(120);
+        // The stale-sweep case: the sweep resumed after ban_after had already
+        // elapsed. Without the fix this stays `ban_after` (in the past), and
+        // the record is immediately due for a ban on the very next tick.
+        let ban_after = now - Duration::seconds(500);
+        assert_eq!(
+            reanchor_ban_deadline(ban_after, now, min_notice),
+            now + min_notice,
+            "a stale ban_after must be pulled forward to exactly now + min_notice"
+        );
+    }
+
+    #[test]
+    fn reanchor_is_exact_at_the_boundary() {
+        let now = Utc::now();
+        let min_notice = Duration::seconds(120);
+        let ban_after = now + min_notice;
+        assert_eq!(reanchor_ban_deadline(ban_after, now, min_notice), ban_after);
     }
 
     fn message(content: &str) -> VerifiedMessage {
