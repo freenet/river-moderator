@@ -149,7 +149,20 @@ pub struct PendingTimestampEnforcement {
     #[serde(default)]
     pub reaction_emoji: Option<String>,
     pub warned_at: DateTime<Utc>,
+    /// Absolute time the NEXT action on this offence is due: the sterner
+    /// second warning while `!escalated`, or the ban once `escalated` (or
+    /// always the ban, for a reason with no escalation stage).
     pub enforce_after: DateTime<Utc>,
+    /// Set once the sterner second warning has been sent. Records written
+    /// before escalation existed default to `false`, which combined with
+    /// `ban_after: None` reproduces the old single-deadline behavior exactly.
+    #[serde(default)]
+    pub escalated: bool,
+    /// The eventual ban deadline, for a reason with an escalation stage.
+    /// `None` means `enforce_after` IS the ban deadline (today's behavior for
+    /// every reason except `FutureTimestamp`).
+    #[serde(default)]
+    pub ban_after: Option<DateTime<Utc>>,
 }
 
 fn default_self_delete_reason() -> SelfDeleteReason {
@@ -588,6 +601,53 @@ impl ModerationState {
             }
         }
         if member_already_pending {
+            drop(table);
+            write.commit()?;
+            return Ok(false);
+        }
+        let encoded = serde_json::to_vec(pending)?;
+        table.insert(key.as_str(), encoded.as_slice())?;
+        drop(table);
+        write.commit()?;
+        Ok(true)
+    }
+
+    /// Overwrite an already-scheduled timestamp enforcement in place, moving it
+    /// from its escalation stage to its ban stage.
+    ///
+    /// Unlike `schedule_timestamp_enforcement`, this does not dedupe by member:
+    /// it assumes the caller just read this exact record via
+    /// `due_timestamp_enforcements` and is advancing it, not creating a new
+    /// offence. It guards against the record having changed since that read --
+    /// not just having been REMOVED (the author complied and the delete-event
+    /// handler already took it via `take_timestamp_enforcement`), but having
+    /// been REPLACED by an unrelated record at the same key. `target_message_id`
+    /// alone is not a stable identity: a redelivered message re-enters
+    /// `begin_self_delete_enforcement` and reserves a fresh record the instant
+    /// the delete handler frees the key, and `begin_reaction_enforcement` keys
+    /// a `BadReaction` offence on the REACTED-TO message's ID, so it can share
+    /// a key with an unrelated message-content offence on that same message.
+    /// A presence-only check would happily overwrite either of those with this
+    /// call's stale data. The identity check (`member_id` + `warned_at`, which
+    /// together uniquely pin the offence this record was created for) closes
+    /// that gap. Returns `false` when identity does not match -- gone,
+    /// replaced, or anything else -- so the caller never treats someone else's
+    /// record as freshly escalated by this call.
+    pub fn advance_timestamp_enforcement(
+        &self,
+        pending: &PendingTimestampEnforcement,
+    ) -> Result<bool> {
+        let key = event_key(&pending.room_owner, &pending.target_message_id);
+        let write = self.database.begin_write()?;
+        let mut table = write.open_table(PENDING_TIMESTAMP)?;
+        let identity_matches = match table.get(key.as_str())? {
+            Some(value) => {
+                let current: PendingTimestampEnforcement = serde_json::from_slice(value.value())?;
+                current.member_id == pending.member_id && current.warned_at == pending.warned_at
+            }
+            None => false,
+        };
+        if !identity_matches {
             drop(table);
             write.commit()?;
             return Ok(false);
@@ -1121,6 +1181,8 @@ mod tests {
             reaction_emoji: None,
             warned_at: at(0),
             enforce_after: at(0) + Duration::seconds(120),
+            escalated: false,
+            ban_after: None,
         };
         state.schedule_timestamp_enforcement(&pending).unwrap();
 
@@ -1140,6 +1202,278 @@ mod tests {
             .take_timestamp_enforcement("room", "msg")
             .unwrap()
             .is_none());
+    }
+
+    /// A reason with an escalation stage (`ban_after: Some`) must not be due
+    /// for the FINAL deadline before its escalation deadline (`enforce_after`)
+    /// arrives, and once escalated must sit quietly until `ban_after`.
+    #[test]
+    fn escalation_stage_is_due_before_the_ban_stage_and_not_after() {
+        let dir = tempdir().unwrap();
+        let state = ModerationState::open(&dir.path().join("state.redb")).unwrap();
+        let pending = PendingTimestampEnforcement {
+            reason: SelfDeleteReason::FutureTimestamp,
+            room_owner: "room".into(),
+            member_id: "member".into(),
+            target_message_id: "msg".into(),
+            target_content_hash: "hash".into(),
+            warning_message_id: Some("notice-1".into()),
+            claimed_skew_seconds: 406,
+            reaction_emoji: None,
+            warned_at: at(0),
+            enforce_after: at(0) + Duration::seconds(120),
+            escalated: false,
+            ban_after: Some(at(0) + Duration::seconds(240)),
+        };
+        state.schedule_timestamp_enforcement(&pending).unwrap();
+
+        // Not yet due for the escalation warning.
+        assert!(state
+            .due_timestamp_enforcements(at(0) + Duration::seconds(119))
+            .unwrap()
+            .is_empty());
+
+        // Due for escalation at 120s.
+        let due = state
+            .due_timestamp_enforcements(at(0) + Duration::seconds(120))
+            .unwrap();
+        assert_eq!(due.len(), 1);
+        assert!(!due[0].escalated, "must not already be marked escalated");
+
+        // The sweep escalates it: sterner warning sent, re-armed for the ban.
+        let escalated = PendingTimestampEnforcement {
+            warning_message_id: Some("notice-2".into()),
+            escalated: true,
+            enforce_after: at(0) + Duration::seconds(240),
+            ..pending.clone()
+        };
+        assert!(state.advance_timestamp_enforcement(&escalated).unwrap());
+
+        // Quiet in the gap between the two deadlines.
+        assert!(state
+            .due_timestamp_enforcements(at(0) + Duration::seconds(150))
+            .unwrap()
+            .is_empty());
+
+        // Due for the ban at 240s, and still correctly marked escalated with
+        // the sterner warning's ID (needed to retract it after the ban).
+        let due = state
+            .due_timestamp_enforcements(at(0) + Duration::seconds(240))
+            .unwrap();
+        assert_eq!(due.len(), 1);
+        assert!(due[0].escalated);
+        assert_eq!(due[0].warning_message_id, Some("notice-2".into()));
+    }
+
+    /// If the author complies between the escalation sweep reading the record
+    /// and writing the escalated version back, `advance_timestamp_enforcement`
+    /// must refuse to resurrect a resolved offence -- otherwise a member who
+    /// deleted their message in time could still be banned later at the ban
+    /// deadline the resurrection reintroduced.
+    #[test]
+    fn advancing_a_taken_enforcement_does_not_resurrect_it() {
+        let dir = tempdir().unwrap();
+        let state = ModerationState::open(&dir.path().join("state.redb")).unwrap();
+        let pending = PendingTimestampEnforcement {
+            reason: SelfDeleteReason::FutureTimestamp,
+            room_owner: "room".into(),
+            member_id: "member".into(),
+            target_message_id: "msg".into(),
+            target_content_hash: "hash".into(),
+            warning_message_id: Some("notice-1".into()),
+            claimed_skew_seconds: 406,
+            reaction_emoji: None,
+            warned_at: at(0),
+            enforce_after: at(0) + Duration::seconds(120),
+            escalated: false,
+            ban_after: Some(at(0) + Duration::seconds(240)),
+        };
+        state.schedule_timestamp_enforcement(&pending).unwrap();
+
+        // Author complies; the delete-event handler takes (removes) it.
+        assert!(state
+            .take_timestamp_enforcement("room", "msg")
+            .unwrap()
+            .is_some());
+
+        // The sweep, racing against that compliance, tries to advance the
+        // stale copy it already had in hand.
+        let escalated = PendingTimestampEnforcement {
+            escalated: true,
+            enforce_after: at(0) + Duration::seconds(240),
+            ..pending
+        };
+        assert!(!state.advance_timestamp_enforcement(&escalated).unwrap());
+
+        // Must still be gone, not resurrected with a ban deadline armed.
+        assert!(state
+            .due_timestamp_enforcements(at(0) + Duration::seconds(600))
+            .unwrap()
+            .is_empty());
+    }
+
+    /// `target_message_id` alone is not a stable identity for this key: a
+    /// redelivered message can reserve a FRESH record the instant the delete
+    /// handler frees the key, and a `BadReaction` offence is keyed on the
+    /// reacted-to message's ID, so it can share a key with an unrelated
+    /// message-content offence on the same message. A presence-only check
+    /// (any record exists at this key) cannot tell "my own record, still
+    /// pending" from "a different record now occupies my key" -- it must
+    /// check identity (member + warned_at), or the stale sweep clobbers
+    /// someone else's live enforcement with its own out-of-date data.
+    #[test]
+    fn advancing_does_not_clobber_a_different_record_at_the_same_key() {
+        let dir = tempdir().unwrap();
+        let state = ModerationState::open(&dir.path().join("state.redb")).unwrap();
+        let stale = PendingTimestampEnforcement {
+            reason: SelfDeleteReason::FutureTimestamp,
+            room_owner: "room".into(),
+            member_id: "member-a".into(),
+            target_message_id: "msg".into(),
+            target_content_hash: "hash".into(),
+            warning_message_id: Some("notice-1".into()),
+            claimed_skew_seconds: 406,
+            reaction_emoji: None,
+            warned_at: at(0),
+            enforce_after: at(0) + Duration::seconds(120),
+            escalated: false,
+            ban_after: Some(at(0) + Duration::seconds(240)),
+        };
+        state.schedule_timestamp_enforcement(&stale).unwrap();
+
+        // Compliance removes it, then a DIFFERENT offence -- a BadReaction on
+        // the same message, or a redelivered message from a different member
+        // -- lands at the exact same key.
+        assert!(state
+            .take_timestamp_enforcement("room", "msg")
+            .unwrap()
+            .is_some());
+        let fresh = PendingTimestampEnforcement {
+            reason: SelfDeleteReason::BadReaction,
+            room_owner: "room".into(),
+            member_id: "member-b".into(),
+            target_message_id: "msg".into(),
+            target_content_hash: String::new(),
+            warning_message_id: Some("notice-fresh".into()),
+            claimed_skew_seconds: 0,
+            reaction_emoji: Some("x".into()),
+            warned_at: at(50),
+            enforce_after: at(50) + Duration::seconds(120),
+            escalated: false,
+            ban_after: None,
+        };
+        state.schedule_timestamp_enforcement(&fresh).unwrap();
+
+        // The sweep, still holding its stale read of the FIRST offence,
+        // tries to advance it -- must refuse rather than overwrite `fresh`.
+        let stale_escalated = PendingTimestampEnforcement {
+            escalated: true,
+            enforce_after: at(0) + Duration::seconds(240),
+            ..stale
+        };
+        assert!(!state
+            .advance_timestamp_enforcement(&stale_escalated)
+            .unwrap());
+
+        // `fresh` must be completely untouched.
+        let due = state
+            .due_timestamp_enforcements(at(50) + Duration::seconds(120))
+            .unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].member_id, "member-b");
+        assert_eq!(due[0].reason, SelfDeleteReason::BadReaction);
+        assert!(!due[0].escalated, "must not have been marked escalated");
+    }
+
+    /// The previous test varies `member_id`, which alone already makes the
+    /// identity check fail -- it cannot prove the `warned_at` half of the
+    /// `member_id == .. && warned_at == ..` check is load-bearing. This is
+    /// the redelivery scenario `advance_timestamp_enforcement`'s own doc
+    /// comment names as the primary motivation: the SAME member's message
+    /// gets redelivered and reserves a FRESH record (a new `warned_at`) the
+    /// instant the delete handler frees the key, and a sweep still holding
+    /// the stale `warned_at` must not advance onto it.
+    #[test]
+    fn advancing_does_not_clobber_a_redelivered_record_from_the_same_member() {
+        let dir = tempdir().unwrap();
+        let state = ModerationState::open(&dir.path().join("state.redb")).unwrap();
+        let stale = PendingTimestampEnforcement {
+            reason: SelfDeleteReason::FutureTimestamp,
+            room_owner: "room".into(),
+            member_id: "member-a".into(),
+            target_message_id: "msg".into(),
+            target_content_hash: "hash".into(),
+            warning_message_id: Some("notice-1".into()),
+            claimed_skew_seconds: 406,
+            reaction_emoji: None,
+            warned_at: at(0),
+            enforce_after: at(0) + Duration::seconds(120),
+            escalated: false,
+            ban_after: Some(at(0) + Duration::seconds(240)),
+        };
+        state.schedule_timestamp_enforcement(&stale).unwrap();
+        assert!(state
+            .take_timestamp_enforcement("room", "msg")
+            .unwrap()
+            .is_some());
+
+        // The message is redelivered and reserves a fresh record for the
+        // SAME member, with a new `warned_at`.
+        let redelivered = PendingTimestampEnforcement {
+            warning_message_id: Some("notice-redelivered".into()),
+            warned_at: at(50),
+            enforce_after: at(50) + Duration::seconds(120),
+            ban_after: Some(at(50) + Duration::seconds(240)),
+            ..stale.clone()
+        };
+        state.schedule_timestamp_enforcement(&redelivered).unwrap();
+
+        // The sweep, still holding its stale read (old warned_at), tries to
+        // advance it -- must refuse even though member_id matches.
+        let stale_escalated = PendingTimestampEnforcement {
+            escalated: true,
+            enforce_after: at(0) + Duration::seconds(240),
+            ..stale
+        };
+        assert!(!state
+            .advance_timestamp_enforcement(&stale_escalated)
+            .unwrap());
+
+        // The redelivered record must be completely untouched.
+        let due = state
+            .due_timestamp_enforcements(at(50) + Duration::seconds(120))
+            .unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].warning_message_id, Some("notice-redelivered".into()));
+        assert!(
+            !due[0].escalated,
+            "must not have been marked escalated by the stale sweep"
+        );
+    }
+
+    /// A record written before escalation existed (no `escalated`/`ban_after`
+    /// fields in its JSON) must deserialize as `escalated: false, ban_after:
+    /// None` -- the single-deadline behavior every reason had before this
+    /// change, and still has today for every reason except `FutureTimestamp`.
+    /// Production has persisted records in the old shape; this is the
+    /// contract that a deploy does not misfire against them.
+    #[test]
+    fn pre_escalation_record_deserializes_to_single_stage_behavior() {
+        let old_format = serde_json::json!({
+            "reason": "future_timestamp",
+            "room_owner": "room",
+            "member_id": "member",
+            "target_message_id": "msg",
+            "target_content_hash": "hash",
+            "warning_message_id": "notice-1",
+            "claimed_skew_seconds": 92,
+            "warned_at": at(0),
+            "enforce_after": at(0) + Duration::seconds(120),
+        });
+        let pending: PendingTimestampEnforcement =
+            serde_json::from_value(old_format).expect("old-format record must still deserialize");
+        assert!(!pending.escalated);
+        assert_eq!(pending.ban_after, None);
     }
 
     /// The exact 2026-07-31 pattern: quiet, then a >=30s gap (a stall), then a
@@ -1208,6 +1542,8 @@ mod tests {
             reaction_emoji: None,
             warned_at: at(0),
             enforce_after: at(0) + Duration::seconds(120),
+            escalated: false,
+            ban_after: None,
         };
         assert!(state
             .schedule_timestamp_enforcement(&pending("first"))
@@ -1249,6 +1585,8 @@ mod tests {
             reaction_emoji: None,
             warned_at: at(0),
             enforce_after: at(0) + Duration::seconds(120),
+            escalated: false,
+            ban_after: None,
         };
 
         assert!(state.schedule_timestamp_enforcement(&pending).unwrap());

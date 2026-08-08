@@ -191,6 +191,14 @@ impl Config {
                 && self.policy.deputy_ban_confidence_millionths <= 1_000_000,
             "confidence thresholds must be ordered and at most one million"
         );
+        anyhow::ensure!(
+            self.policy.future_timestamp_ban_grace_seconds
+                >= self.policy.future_timestamp_grace_seconds + MIN_STERN_WARNING_WINDOW_SECONDS,
+            "future-timestamp ban deadline must leave at least the window \
+             FUTURE_TIMESTAMP_STERN_WARNING promises (\"2 minutes\") after the escalation \
+             deadline -- a merely-positive gap (e.g. grace + 1) would validate while silently \
+             giving the member a 1-second window the warning text claims is 2 minutes"
+        );
         Ok(())
     }
 }
@@ -360,6 +368,17 @@ fn default_future_timestamp_grace_seconds() -> u64 {
     120
 }
 
+fn default_future_timestamp_ban_grace_seconds() -> u64 {
+    240
+}
+
+/// `crate::warnings::FUTURE_TIMESTAMP_STERN_WARNING` literally promises "2
+/// minutes". `validate()` enforces the escalate-to-ban gap is at least this,
+/// not merely positive -- otherwise a config like `grace = 120, ban_grace =
+/// 121` would pass validation while silently giving the member a 1-second
+/// window the warning text claims is 2 minutes.
+const MIN_STERN_WARNING_WINDOW_SECONDS: u64 = 120;
+
 fn default_embedded_image_grace_seconds() -> u64 {
     60
 }
@@ -389,11 +408,23 @@ pub struct PolicyConfig {
     /// alongside the three that were an hour or more out.
     #[serde(default = "default_future_timestamp_seconds")]
     pub future_timestamp_seconds: i64,
-    /// How long the author has to delete a future-dated message before it is
-    /// enforced. Their own deletion is the only remedy: the contract lets only
-    /// the author delete, so the moderator cannot clear it for them.
+    /// How long the author has to delete a future-dated message before a
+    /// sterner second warning is posted. Their own deletion is the only
+    /// remedy: the contract lets only the author delete, so the moderator
+    /// cannot clear it for them.
     #[serde(default = "default_future_timestamp_grace_seconds")]
     pub future_timestamp_grace_seconds: u64,
+    /// How long, from the original warning, the author has before the
+    /// message is enforced (the account removed). Measured budget was
+    /// 2026-08-08: 26 of 34 bans over two weeks were this reason, and content
+    /// was routinely benign (a new member's first "Hello") -- a single
+    /// 120-second window gives no room for a newcomer to miss one notice.
+    /// Must be at least `future_timestamp_grace_seconds +
+    /// MIN_STERN_WARNING_WINDOW_SECONDS`; the gap between the two is the
+    /// stern-warning window, and it must cover what
+    /// `FUTURE_TIMESTAMP_STERN_WARNING` literally promises ("2 minutes").
+    #[serde(default = "default_future_timestamp_ban_grace_seconds")]
+    pub future_timestamp_ban_grace_seconds: u64,
     /// Deletion window for an embedded image. Shorter than the timestamp case:
     /// a future-dated "hlo" is usually a broken clock, whereas an embedded image
     /// is always deliberate, and what it shows is visible to everyone meanwhile.
@@ -486,5 +517,56 @@ mod tests {
         assert!(model
             .maximum_request_cost_microusd(2, ModelRole::Classifier)
             .is_err());
+    }
+
+    /// A ban deadline at or before the escalation deadline would collapse
+    /// this feature's whole point: `ban_after` (computed at `warned_at`) is
+    /// already elapsed by the time the escalation sweep even fires, so the
+    /// stern second warning would arm a ban the very next 5-second tick --
+    /// the 2-minute cushion this exists to add silently becomes ~5 seconds.
+    /// Loads the repo's own shipped example config rather than hand-building
+    /// a full `Config` literal, since nothing else in this file does that.
+    #[test]
+    fn future_timestamp_ban_deadline_must_be_after_the_escalation_deadline() {
+        let mut config = Config::load(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/config.example.toml"
+        )))
+        .expect("the shipped example config must parse");
+        config
+            .validate()
+            .expect("the shipped example config must be valid as shipped");
+
+        config.policy.future_timestamp_ban_grace_seconds =
+            config.policy.future_timestamp_grace_seconds;
+        assert!(
+            config.validate().is_err(),
+            "a ban deadline equal to the escalation deadline must be rejected"
+        );
+
+        config.policy.future_timestamp_ban_grace_seconds =
+            config.policy.future_timestamp_grace_seconds - 1;
+        assert!(
+            config.validate().is_err(),
+            "a ban deadline before the escalation deadline must be rejected"
+        );
+
+        // A merely-positive gap is not enough: FUTURE_TIMESTAMP_STERN_WARNING
+        // literally promises "2 minutes", so a 1-second gap must be rejected
+        // even though it satisfies "after".
+        config.policy.future_timestamp_ban_grace_seconds =
+            config.policy.future_timestamp_grace_seconds + 1;
+        assert!(
+            config.validate().is_err(),
+            "a gap smaller than the window the warning text promises must be rejected"
+        );
+
+        // Exactly the promised window must be accepted.
+        config.policy.future_timestamp_ban_grace_seconds =
+            config.policy.future_timestamp_grace_seconds + MIN_STERN_WARNING_WINDOW_SECONDS;
+        assert!(
+            config.validate().is_ok(),
+            "a gap exactly matching the promised window must be accepted"
+        );
     }
 }
